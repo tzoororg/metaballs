@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:icon="@android:drawable/ic_menu_gallery"
+        android:hardwareAccelerated="true">
+
+        <!-- No launcher activity: configured via Settings -> Screen saver. -->
+
+        <activity
+            android:name=".DreamSettingsActivity"
+            android:label="Metaballs Screensaver Settings"
+            android:exported="true" />
+
+        <service
+            android:name=".MetaballsDream"
+            android:exported="true"
+            android:permission="android.permission.BIND_DREAM_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.dreams.DreamService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.dream"
+                android:resource="@xml/dream" />
+        </service>
+
+    </application>
+
+</manifest>
