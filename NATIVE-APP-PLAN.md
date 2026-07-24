@@ -98,15 +98,22 @@ install, all covered by `adb` (already on PATH) and the existing mobile-mcp.
 Optional nicety: a tiny `phone-app.sh` helper mirroring `phone-connect.sh`
 (build → install → screencap) to make the loop one command.
 
-### One-time build environment setup (not yet present)
-The SDK here has **only `platform-tools` (adb)**. Building an APK needs, once:
+### Build environment — DONE (Phase 0, 2026-07-24)
+Installed and verified on this machine:
+- **JDK 21.0.11** (Temurin, full JDK — the pre-existing Adoptium install was a
+  *JRE* with no `javac`): `C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot`
+  → set `JAVA_HOME` to this for Gradle (NOT the `jre-…` sibling).
+- **Android SDK** at `C:\Users\tzoor\AppData\Local\Android\Sdk` now has
+  `cmdline-tools\latest` (sdkmanager 12.0), `platform-tools;37.0.0`,
+  `platforms;android-35`, `build-tools;35.0.0` (aapt2 present).
+- The **Gradle wrapper** (`gradlew`, added in Phase 1) fetches Gradle itself —
+  no global Gradle install needed.
+
+To re-run from scratch elsewhere:
 ```bash
-# via Android Studio, or sdkmanager from cmdline-tools:
+export JAVA_HOME=".../Eclipse Adoptium/jdk-21.0.11.10-hotspot"   # a JDK, not a JRE
 sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 ```
-JDK 21 is already installed; the **Gradle wrapper** (`gradlew`) fetches Gradle
-itself, so no global Gradle install. This download is a few hundred MB — a
-deliberate one-time step, flagged here so it's not a surprise.
 
 ---
 
@@ -143,8 +150,10 @@ deliberate one-time step, flagged here so it's not a surprise.
 
 ## 4. Implementation phases
 
-**Phase 0 — build env (one-time).** Install `cmdline-tools` + `platforms;android-35`
-+ `build-tools;35.0.0` via sdkmanager/Android Studio. Verify `gradlew tasks` runs.
+**Phase 0 — build env (one-time). ✅ DONE 2026-07-24.** JDK 21, cmdline-tools,
+`platform-tools;37`, `platforms;android-35`, `build-tools;35.0.0` all installed
+and verified (see "Build environment" above). Only remaining check —
+`gradlew tasks` — happens once the wrapper is scaffolded in Phase 1.
 
 **Phase 1 — DreamService screensaver (reuses `index.html`).** *Ships the core ask.*
 1. Scaffold minimal Gradle project under `/android` (no launcher activity).
