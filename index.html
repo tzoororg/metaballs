@@ -72,11 +72,11 @@ function showError(msg){
 
 // --- UI wiring FIRST, so controls respond even if WebGL never starts ---
 let style = 0;
-const chrome = document.getElementById('chrome');
-chrome.addEventListener('click', e=>{
+const controls = document.getElementById('chrome');  // not `chrome`: window.chrome is a non-configurable global on Android → const collision = parse-time SyntaxError
+controls.addEventListener('click', e=>{
   const btn = e.target.closest('button'); if(!btn) return;
   style = +btn.dataset.style;
-  [...chrome.querySelectorAll('button')].forEach(b=>
+  [...controls.querySelectorAll('button')].forEach(b=>
     b.setAttribute('aria-pressed', b===btn));
 });
 let idle;
