@@ -59,7 +59,39 @@
 
 <script>
 const canvas = document.getElementById('gl');
-const gl = canvas.getContext('webgl', { antialias:true, premultipliedAlpha:false });
+
+// Never fail to a silent black screen — show what went wrong.
+function showError(msg){
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;'
+    + 'justify-content:center;padding:28px;text-align:center;line-height:1.5;'
+    + 'color:rgba(255,255,255,.85);font-size:13px;background:#0b0b12;z-index:20';
+  el.textContent = msg;
+  document.body.appendChild(el);
+}
+
+// --- UI wiring FIRST, so controls respond even if WebGL never starts ---
+let style = 0;
+const chrome = document.getElementById('chrome');
+chrome.addEventListener('click', e=>{
+  const btn = e.target.closest('button'); if(!btn) return;
+  style = +btn.dataset.style;
+  [...chrome.querySelectorAll('button')].forEach(b=>
+    b.setAttribute('aria-pressed', b===btn));
+});
+let idle;
+function wake(){
+  document.body.classList.remove('idle');
+  clearTimeout(idle);
+  idle = setTimeout(()=>document.body.classList.add('idle'), 3500);
+}
+['pointermove','pointerdown','keydown','touchstart'].forEach(ev=>
+  addEventListener(ev, wake, {passive:true}));
+wake();
+
+const opts = { antialias:true, premultipliedAlpha:false };
+const gl = canvas.getContext('webgl', opts) || canvas.getContext('experimental-webgl', opts);
+if(!gl){ showError('This browser could not start WebGL, so the animation can’t run.'); throw new Error('no webgl'); }
 
 const MAX = 12;
 const COUNT = 10;
@@ -69,7 +101,11 @@ attribute vec2 pos;
 void main(){ gl_Position = vec4(pos,0.0,1.0); }`;
 
 const fsrc = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
+#else
+precision mediump float;
+#endif
 uniform vec2  uRes;
 uniform float uTime;
 uniform int   uStyle;
@@ -150,13 +186,21 @@ void main(){
 
 function compile(type,src){
   const s = gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
-  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){
+    const log = gl.getShaderInfoLog(s);
+    showError('Shader failed to compile on this device:\n' + log);
+    throw new Error(log);
+  }
   return s;
 }
 const prog = gl.createProgram();
 gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsrc));
 gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsrc));
 gl.linkProgram(prog); gl.useProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+  showError('Shader program failed to link: ' + gl.getProgramInfoLog(prog));
+  throw new Error('link failed');
+}
 
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -195,7 +239,6 @@ function resize(){
 }
 addEventListener('resize', resize); resize();
 
-let style = 0;
 let last = performance.now();
 const SPEED = 0.055;          // dreamy, but visibly moving
 const reduce = matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -226,26 +269,6 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-
-// --- style switcher ---
-const chrome = document.getElementById('chrome');
-chrome.addEventListener('click', e=>{
-  const btn = e.target.closest('button'); if(!btn) return;
-  style = +btn.dataset.style;
-  [...chrome.querySelectorAll('button')].forEach(b=>
-    b.setAttribute('aria-pressed', b===btn));
-});
-
-// --- auto-hide chrome after inactivity (screensaver feel) ---
-let idle;
-function wake(){
-  document.body.classList.remove('idle');
-  clearTimeout(idle);
-  idle = setTimeout(()=>document.body.classList.add('idle'), 3500);
-}
-['pointermove','pointerdown','keydown','touchstart'].forEach(ev=>
-  addEventListener(ev, wake, {passive:true}));
-wake();
 </script>
 </body>
 </html>
