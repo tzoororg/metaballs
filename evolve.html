@@ -157,8 +157,8 @@ const tabs = document.getElementById('tabs');
 function setScene(n){
   scene = n;
   [...tabs.querySelectorAll('button')].forEach(b => b.setAttribute('aria-pressed', +b.dataset.scene === n));
-  glCanvas.hidden  = n > 0;
-  c2dCanvas.hidden = n === 0;
+  glCanvas.hidden  = n > 1;      // 0 metaballs and 1 galaxy are both WebGL
+  c2dCanvas.hidden = n < 2;
 }
 tabs.addEventListener('click', e => {
   const b = e.target.closest('button'); if(b) setScene(+b.dataset.scene);
@@ -293,10 +293,11 @@ gl.attachShader(prog, compile(gl.FRAGMENT_SHADER,fsrc));
 gl.linkProgram(prog); gl.useProgram(prog);
 if(!gl.getProgramParameter(prog,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
 
-gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+// the full-screen triangle, shared with the galaxy's background pass
+const fsBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, fsBuf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
 const aloc = gl.getAttribLocation(prog,'pos');
-gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc,2,gl.FLOAT,false,0,0);
 const U = n => gl.getUniformLocation(prog,n);
 const uRes=U('uRes'), uTime=U('uTime'), uP=U('uP'),
       uBalls=U('uBalls'), uCount=U('uCount'), uArrive=U('uArrive'), uOver=U('uOver');
@@ -313,6 +314,12 @@ const ballData = new Float32Array(MAX*3);
 let glAspect = 1;
 
 function drawGL(dt, t){
+  // the galaxy scene shares this context, so state is set per draw, not once
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, fsBuf);
+  gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc,2,gl.FLOAT,false,0,0);
+  gl.viewport(0,0,glCanvas.width,glCanvas.height);
+  gl.uniform2f(uRes, glCanvas.width, glCanvas.height);
   const count = Math.max(1, Math.round(lerp(1, MAX, late(p))));
   // radius shrinks as count grows, or 14 balls fuse into one featureless mass at p=1
   const rs = lerp(1.5, 0.6, late(p)) * (1 + 0.28*over);
@@ -351,129 +358,427 @@ function haze(x,y,r,rgb,a){
   ctx.fillStyle = g; ctx.fillRect(x-r,y-r,r*2,r*2);
 }
 
-// --- GALAXY --------------------------------------------------------------
-// Dust cloud -> nebula -> spiral. The arms are never allowed to resolve into
-// clean threads: adherence is PER STAR, so a permanent halo of strays remains.
-const STARS = 2800, ARMS = 3;
-const ridge = document.createElement('canvas');   // quarter-res scratch for the blurred arms
-const ridgeCtx = ridge.getContext('2d');
-let ridgeAge = 0;
-// Per-star constants are fixed for the whole session, so they're computed once.
-// Doing it per frame meant ~28k Math.sin calls (rnd) + 2800 colour strings every
-// frame, which alone cost half the frame budget.
-const stars = Array.from({length: STARS}, (_,i) => {
-  const warm = rnd(i,4);
-  return {
-    born: i/STARS,
-    rr: Math.pow(rnd(i,1), 0.62),     // density must FALL outward or it reads as a rim
-    arm: i % ARMS,
-    bind: rnd(i,10),                  // per-star arm adherence; low = permanent stray
-    scatter: rnd(i,2)*6.2832,
-    spread: 0.35 + rnd(i,5),
-    jitter: 1 + 0.34*(rnd(i,17)-0.5), // arms need thickness
-    wob: (rnd(i,3)-0.5),
-    size: 0.35 + rnd(i,6)*0.95,       // dust, not glitter
-    warm,
-    giant: rnd(i,18) > 0.992,
-    cool: `rgb(${170+warm*60|0},${200+warm*40|0},255)`,
-    hot:  `rgb(255,${190+warm*50|0},150)`,
-  };
-});
-function galaxy(t){
-  ctx.fillStyle = '#02030a'; ctx.fillRect(0,0,W,H);
-  const cx = W/2, cy = H/2, R = Math.min(W*0.42, H*0.32);
-  const order = late(p);
-  ctx.globalCompositeOperation = 'lighter';
+// --- GALAXY (WebGL) ------------------------------------------------------
+// Rewritten off 2D canvas. The old one could afford 2800 fillRects inside a
+// small centred oval, which is exactly why three quarters of the screen was
+// empty. This is one background quad + one POINTS draw of ~40k sprites, so the
+// galaxy can be BIGGER THAN THE FRAME — the disc runs off all four edges and
+// the frame is a window onto something larger, not a specimen in a jar.
+//
+// Structure is a DENSITY WAVE, not a pinwheel. Stars orbit differentially
+// (inner faster) while the two-arm pattern rotates slowly and rigidly, and
+// stars are *crowded toward* the pattern rather than glued to it. So the arms
+// survive a 90-minute session instead of winding themselves shut, and you can
+// watch stars stream through an arm and out the other side.
+//
+// Dust lanes are not drawn — they can't be, everything here is additive. They
+// are an absorption term: the same spiral phase, offset by ~0.7 rad so the lane
+// lands on the INNER edge of the arm where it belongs, dimming and reddening
+// both the background glow and every star behind it. Dark structure is what
+// makes bright structure look bright; without this there are no blacks inside
+// the galaxy at all and the arms read as stipple.
+const GAL = { disc: 34000, hii: 260, glob: 150, field: 5200, bright: 6 };
+const GN = GAL.disc + GAL.hii + GAL.glob + GAL.field + GAL.bright;
+const ARMS = 2.0, PITCH = 0.42;   // 2 arms = grand design; PITCH = how open they are
 
-  // nebula: colour arrives before structure, so mid-p is a glowing cloud, not a gap
-  const neb = stage(0.10, 0.72);
-  for(let i=0;i<9;i++){
-    const a  = rnd(i,21)*6.2832 + t*0.015*(1+rnd(i,25));
-    const rr = R*(0.20+0.65*rnd(i,22));
-    const x = cx + Math.cos(a)*rr, y = cy + Math.sin(a)*rr*0.8;
-    const rad = R*(0.30+0.40*rnd(i,23));
-    const warm = rnd(i,24);
-    const rgb = warm > 0.62 ? '255,90,150' : warm > 0.3 ? '110,80,255' : '40,150,220';
-    haze(x, y, rad, rgb, 0.16*neb*(0.5+rnd(i,26)));
-  }
-
-  // luminous ridges along the spiral. Without these the arms are just a denser
-  // line of dots and read as beads; the glow is what makes them arms.
-  // A ribbon, not a row of soft blobs — discrete gradients along the curve
-  // read as beads. Three widths of the same path fake a soft-edged arm.
-  // A stroked ribbon has a hard edge and reads as a grey worm, so it gets blurred.
-  // Drawn on a quarter-res offscreen: the blur is 16x cheaper there and it's
-  // going to be soft anyway.
-  if(order > 0.02){
-    const o = ridgeCtx, s = 0.25;
-    // ponytail: the blur is the frame's most expensive op and the ribbon turns at
-    // 0.05 rad/s — rebuilding every 5th frame is free and indistinguishable.
-    if(ridgeAge++ % 5 === 0){
-    o.setTransform(1,0,0,1,0,0);
-    o.clearRect(0,0,ridge.width,ridge.height);
-    o.filter = `blur(${Math.max(2,R*0.035*s)}px)`;
-    o.lineCap = 'round'; o.lineJoin = 'round';
-    for(let a=0;a<ARMS;a++){
-      o.beginPath();
-      for(let k=0;k<=40;k++){
-        const rr = 0.06 + 0.94*k/40;
-        const ang = a/ARMS*6.2832 + rr*2.6 + t*0.05/(0.25+rr);
-        o.lineTo((cx + Math.cos(ang)*R*rr)*s, (cy + Math.sin(ang)*R*rr*0.8)*s);
-      }
-      o.lineWidth = R*0.22*s; o.strokeStyle = `rgba(80,110,215,${0.10*order})`; o.stroke();
-      o.lineWidth = R*0.10*s; o.strokeStyle = `rgba(140,170,255,${0.13*order})`; o.stroke();
-      o.lineWidth = R*0.035*s; o.strokeStyle = `rgba(205,220,255,${0.16*order})`; o.stroke();
-    }
-    o.filter = 'none';
-    }
-    ctx.drawImage(ridge, 0, 0, W, H);
-  }
-
-  const n = Math.round(lerp(40, STARS, late(p)));
-  // more warm giants as p rises, and it keeps going while overdue — an old
-  // galaxy reddens. Additive: stars change colour, none of them go out.
-  const warmCut = lerp(0.88,0.5,p) - 0.14*over;
-  for(let i=0;i<n;i++){
-    const st = stars[i];
-    const age = clamp01((p - st.born*0.86)/0.14);     // fade in, never out
-    if(age <= 0) continue;
-    const rr = st.rr;
-    // ~20% of stars never join an arm — that permanent haze is what keeps the
-    // finish from resolving into three clean threads
-    const oi = clamp01(order * (st.bind < 0.22 ? st.bind*0.9 : 0.35 + 1.15*st.bind));
-    const armAngle = st.arm/ARMS*6.2832 + rr*2.6;     // logarithmic-ish spiral
-    const ang = lerp(st.scatter, armAngle, oi)
-              + lerp(1.0, 0.30, oi)*st.spread*st.wob
-              + t*0.05/(0.25+rr);                     // differential rotation
-    const rad = R*rr*lerp(0.80,1.0,oi)*st.jitter;
-    const x = cx + Math.cos(ang)*rad, y = cy + Math.sin(ang)*rad*0.8;
-    const size = st.size * PX * lerp(0.8,1.1,oi);
-    const tw = 0.75 + 0.25*Math.sin(t*1.7 + i);
-    ctx.globalAlpha = age*tw*lerp(0.30,0.85,oi)*(1-0.5*rr);   // outer stars dim out
-    ctx.fillStyle = st.warm > warmCut ? st.hot : st.cool;
-    // fillRect, not arc: stars are 1-3px, the shape is invisible, and 2800 arc
-    // fills cost ~20fps on the phone
-    ctx.fillRect(x-size, y-size, size*2, size*2);
-    if(st.giant){                                     // a few giants carry halos
-      ctx.globalAlpha = 1;
-      haze(x,y,size*9,'190,215,255',0.10*age);
-    }
-  }
-  ctx.globalAlpha = 1;
-
-  // core bulge: grows, warms, and stays soft-edged
-  const cb = late(p);
-  haze(cx,cy,R*lerp(0.18,0.50,cb), `255,${205-35*cb|0},${165-55*cb|0}`, lerp(0.05,0.30,cb));
-  haze(cx,cy,R*lerp(0.05,0.16,cb), '255,240,225', lerp(0.06,0.35,cb));
-  // ARRIVED: the disc gains an outer envelope — a faint halo enclosing the whole
-  // thing. It's the cue that survives a glance: the galaxy has an edge now, it
-  // stopped being a field of stars that happens to be spiralling.
-  haze(cx,cy,R*(1.5+0.45*over), '90,120,220', 0.10*arrive);
-  // OVERDUE: the core keeps swelling and going gold, very slowly.
-  haze(cx,cy,R*(0.55+0.55*over), '255,190,120', 0.16*over);
-  ctx.globalCompositeOperation = 'source-over';
+// One interleaved buffer, 8 floats/star: aA(r, phase, bind, born) aB(size, warm, kind, seed).
+// kind: 0 disc star, 1 HII region, 2 deep field, 3 foreground star, 4 globular.
+// For kinds 2/3 aA.xy is a screen uv instead — those don't belong to the galaxy.
+const gdata = new Float32Array(GN*8);
+{
+  let gi = 0;
+  const put = (...v) => { gdata.set(v, gi*8); gi++; };
+  for(let i=0;i<GAL.disc;i++) put(
+    Math.pow(rnd(i,1), 0.55),                 // r — density must fall outward
+    rnd(i,2)*6.2832,                          // orbital phase
+    // ~18% never bind to an arm. That permanent haze is the whole reason the
+    // finish doesn't resolve into two clean threads.
+    rnd(i,10) < 0.18 ? rnd(i,11)*0.30 : 0.45+0.55*rnd(i,11),
+    i/GAL.disc,                               // born
+    // A POWER LAW, not a uniform band. Thousands you can barely see and a few
+    // dozen that punch — a flat size range makes 34k sprites read as one pen.
+    Math.min(6.0, 0.42*Math.pow(Math.max(rnd(i,6),0.004), -0.42)),
+    rnd(i,4), 0, rnd(i,7));
+  // HII regions: the pink knots that make a real galaxy photo pop. They CLUMP —
+  // three in a knot then a long gap — because evenly spaced ones read as a
+  // necklace of beads. Long-tailed sizes, and not quite glued to the crest.
+  for(let i=0;i<GAL.hii;i++) put(
+    0.16 + Math.pow(rnd(i,31),0.8)*0.88,
+    Math.floor(rnd(i,32)*22)/22*6.2832 + (rnd(i,36)-0.5)*0.35,
+    0.80 + 0.20*rnd(i,37), 0,
+    // capped just under the 110px gl_PointSize clamp: anything above ~37 here
+    // rendered at exactly the same size anyway, so the top of the old range
+    // bought nothing and cost fill. Area goes as size² — this halves the HII
+    // fill, which was the single largest thermal contributor in the frame.
+    5 + Math.pow(rnd(i,33),2.6)*30, rnd(i,34), 1, rnd(i,35));
+  // Globular clusters: a spheroidal halo that ignores the disc plane entirely.
+  // They're what fills the two corners the inclined disc can't reach, and they
+  // belong to the galaxy instead of being more anonymous background.
+  for(let i=0;i<GAL.glob;i++) put(
+    Math.pow(rnd(i,61),0.35)*1.6, rnd(i,62)*6.2832, 0, 0,
+    3 + rnd(i,63)*6, 0.6+0.4*rnd(i,64), 4, rnd(i,65));
+  for(let i=0;i<GAL.field;i++) put(
+    rnd(i,41), rnd(i,42), 0, 0, 0.45+rnd(i,43)*0.85, rnd(i,44), 2, rnd(i,45));
+  // Six near stars with diffraction spikes — the tell that sells a photograph.
+  // Six, not fourteen: evenly scattered they compete with the galaxy for the eye.
+  // HAND-PLACED, not rnd(): with only six samples the draw matters, and rnd is
+  // deterministic, so a bad draw is a bad composition in every session forever —
+  // the first version put two of them right on top of the nucleus. Kept clear of
+  // the centre, and weighted into the two corners the inclined disc can't reach.
+  for(const [x,y,sz] of [[0.86,0.83,74],[0.72,0.92,26],[0.14,0.17,58],
+                         [0.28,0.09,22],[0.90,0.32,34],[0.10,0.68,20]])
+    put(x, y, 0, 0, sz, rnd(gi,54), 3, rnd(gi,55));
 }
 
+// Value-noise texture, built once. fbm from two texture taps costs a fraction
+// of fract(sin()) octaves in the fragment shader, and the phone is the target.
+const noiseTex = (() => {
+  const N = 256, img = new Uint8Array(N*N*4);
+  const lat = f => {                       // one smooth channel at lattice size f
+    const g = Array.from({length:f*f}, (_,i) => rnd(i, f));
+    const at = (x,y) => g[((y%f)+f)%f*f + ((x%f)+f)%f];
+    return (u,v) => {
+      const x = u*f, y = v*f, xi = Math.floor(x), yi = Math.floor(y);
+      const fx = ease(x-xi), fy = ease(y-yi);
+      return lerp(lerp(at(xi,yi), at(xi+1,yi), fx), lerp(at(xi,yi+1), at(xi+1,yi+1), fx), fy);
+    };
+  };
+  const ch = [lat(16), lat(32), lat(64)];
+  for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+    const o = (y*N+x)*4;
+    for(let c=0;c<3;c++) img[o+c] = ch[c](x/N, y/N)*255;
+    img[o+3] = 255;
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,N,N,0,gl.RGBA,gl.UNSIGNED_BYTE,img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  // Mipmaps are not optional here. The shader samples this at frequencies that
+  // put a noise cell below a pixel at the disc's outer edge, and unmipped that
+  // aliases into a fixed herringbone hatch lying across the dust lanes.
+  // texture2D in a fragment shader picks the level from implicit derivatives,
+  // so this costs nothing and needs no extension.
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return tex;
+})();
+
+// Shared between both shaders so the stars and the glow they sit in can never
+// disagree about where an arm is.
+const GAL_COMMON = `
+uniform vec2  uRes;
+uniform vec3  uGeo;    // cx, cy, R (device px)
+uniform vec4  uEnv;    // t, p, arrive, over
+uniform vec2  uInc;    // cos(inclination), sin(inclination)
+uniform float uRot, uForm;
+#define ARMS ${ARMS.toFixed(1)}
+#define PITCH ${PITCH.toFixed(2)}
+#define PAT 0.006
+#define DUSTOFF 1.45   // ~0.72 rad in theta: the lane sits on the arm's inner edge
+vec2 grot(vec2 v, float a){ float c=cos(a), s=sin(a); return vec2(v.x*c-v.y*s, v.x*s+v.y*c); }
+// spiral phase: 0 on an arm crest. log(r) is what makes it logarithmic.
+// The m=1 term is what stops the two arms from being exact 180-degree copies of
+// each other. Perfect two-fold symmetry is the loudest "a machine drew this"
+// tell there is — no real grand-design spiral has it. It co-rotates with the
+// pattern so the asymmetry never looks pinned to the screen.
+float gphase(float r, float th, float t){
+  return th - log(max(r,0.04))/PITCH - t*PAT + 0.33*cos(th - t*PAT);
+}
+`;
+
+const galVsrc = `
+attribute vec4 aA, aB;
+${GAL_COMMON}
+uniform float uPx;
+varying vec4 vCol; varying vec3 vK;   // kind class, seed, spike falloff
+void main(){
+  float t = uEnv.x, p = uEnv.y, arrive = uEnv.z, over = uEnv.w;
+  float kind = aB.z, seed = aB.w, form = uForm;
+  vec2 sp; vec3 col; float a, ps = aB.x*uPx;
+  vK = vec3(0.0, seed, 4.5);
+
+  if(kind > 1.5 && kind < 3.5){
+    // Deep field + foreground stars: pinned to the screen, not the galaxy. They
+    // are most of what keeps the corners from being dead black. These are the
+    // only stars allowed to twinkle — scintillation is an atmosphere effect and
+    // nothing 50 million light years away is doing it.
+    sp = aA.xy*uRes;
+    col = mix(vec3(0.70,0.80,1.0), vec3(1.0,0.84,0.62), aB.y*aB.y);
+    float tw = 0.86 + 0.08*sin(t*0.9+seed*57.0) + 0.06*sin(t*2.37+seed*23.0);
+    a = (0.16+0.34*aB.y)*tw;
+    if(kind > 2.5){
+      vK.x = 2.0;
+      vK.z = 4.5/(aB.x/28.0);                       // long spikes on big stars only
+      // they arrive with the session instead of sitting on top of it from frame 1
+      a = (0.55+0.35*aB.y)*tw*(0.35+0.65*smoothstep(0.10,0.60,p));
+    }
+  } else {
+    float r = aA.x, th, rr, w = 0.0, dust = 0.0, h;
+    if(kind > 3.5){
+      // globular cluster: spheroidal, slow, indifferent to the disc
+      th = aA.y + t*0.020/(0.55+r);
+      rr = r*mix(1.5,1.0,form);
+      h  = (fract(seed*97.13)-0.5)*2.1;
+      vK.x = 1.0;                                    // soft puff
+      // pale, not tan: at full warmth and 0.34 alpha these read as bokeh — dust
+      // on the lens rather than clusters 50 thousand light years out
+      col = mix(vec3(0.94,0.93,0.86), vec3(1.0,0.84,0.64), aB.y);
+      a = smoothstep(0.15,0.7,p)*0.20*(0.5+0.5*aB.y);
+    } else {
+      // differential rotation: the inner disc laps the outer one, which is the
+      // motion you actually read as "it's turning"
+      // 0.030, not 0.075: at 0.075 the inner disc turned once every 30 seconds,
+      // which over a 90-minute session reads as a mechanism running rather than
+      // an object drifting. Still visibly turning if you watch for a minute.
+      th = aA.y + t*0.030/(0.30+r);
+      th += (1.0-form)*(seed-0.5)*7.0;               // pre-collapse chaos
+      float amp = form*mix(0.20, 1.30, aA.z);        // per-star arm adherence
+      th -= amp*sin(ARMS*gphase(r,th,t))/ARMS;       // crowd toward the crest
+      rr = r*mix(1.70,1.0,form)*(1.0 - 0.05*amp*cos(ARMS*gphase(r,th,t)));
+      float ph = gphase(rr,th,t);
+      w = pow(max(0.5+0.5*cos(ARMS*ph), 1e-4), 2.2);                 // on-arm
+      w *= 0.72 + 0.50*cos(th - t*PAT);              // one arm brighter (see gphase)
+      // phase-perturbed per star, not amplitude-modulated: as a multiplier this
+      // chopped the lane into dashes at the sprite level the same way it did in
+      // the background pass
+      dust = pow(max(0.5+0.5*cos(ARMS*(ph + DUSTOFF + 0.45*(fract(seed*31.7)-0.5))),1e-4), 6.0)
+             * form * smoothstep(0.05,0.30,rr);
+      // disc thickness: a puffed spheroid that flattens as it forms
+      h = (fract(seed*97.13)-0.5)*mix(0.60,0.055,form)*exp(-rr*0.8);
+
+      float bulge = exp(-rr*4.2);
+      // young blue stars ride the arms; the bulge is old and gold
+      float temp = clamp(bulge*1.3 + aB.y*0.85 - w*form*0.5 + dust*0.5, 0.0, 1.0);
+      col = mix(vec3(0.58,0.74,1.0), vec3(1.0,0.78,0.50), temp);
+      float age = clamp((p - aA.w*0.80)/0.16, 0.0, 1.0);
+      a = age
+        // The interarm FLOOR itself falls with form. A flat 0.20 floor made the
+        // arms dark-gapped at p=1 but also extinguished the entire early star
+        // population (w*form is ~0 there), leaving the opening minutes as pure
+        // gas. High floor early = a diffuse proto-swarm; low floor late = arms.
+        * mix(mix(0.55,0.20,form), 1.0, w*form)
+        * (1.0-0.88*dust)
+        * (0.30+0.70*exp(-rr*1.05))                  // disc fades outward
+        * clamp(aB.x*0.75, 0.35, 2.4)                // big stars are also brighter
+        // the few stars that exist early have to carry the frame on their own,
+        // so they burn brighter before the disc has anything else to show
+        * (1.0 + 0.9*(1.0-form)*(1.0-form));
+      ps *= mix(1.25,1.0,form);   // 1.25 not 1.6: early fill is when it's warming up
+      if(kind > 0.5){                                // HII region
+        vK.x = 1.0;
+        col = mix(vec3(1.0,0.30,0.52), vec3(1.0,0.62,0.72), aB.y);
+        a = smoothstep(0.42,0.85,p)*(0.10+0.10*aB.y)*(0.35+0.65*w)*(1.0-0.6*dust);
+      }
+    }
+    // project the disc plane to screen: squash one axis by cos(inc), let the
+    // out-of-plane height show up along the squashed axis, then roll the whole thing
+    sp = uGeo.xy + grot(vec2(cos(th)*rr, sin(th)*rr*uInc.x + h*uInc.y), uRot)*uGeo.z;
+  }
+  // OVERDUE: the galaxy reddens. Not the deep field or the six near stars —
+  // those are in OUR galaxy and have no business ageing with the session.
+  if(kind < 1.5 || kind > 3.5) col = mix(col, vec3(1.0,0.60,0.32), 0.30*over);
+  vCol = vec4(col, a);
+  gl_PointSize = clamp(ps, 1.0, 110.0);
+  gl_Position = vec4((sp/uRes)*2.0-1.0, 0.0, 1.0);
+}`;
+
+const galFsrc = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec4 vCol; varying vec3 vK;
+void main(){
+  vec2 q = gl_PointCoord-0.5;
+  float d = length(q)*2.0, a;
+  if(vK.x > 0.5 && vK.x < 1.5) a = exp(-d*d*3.2);              // soft nebular puff
+  else {
+    a = exp(-d*d*9.0) + 0.26*exp(-d*3.4);                      // core + halo
+    if(vK.x > 1.5){                                            // diffraction spikes
+      // rotated per star — six identical axis-aligned crosses read as stickers
+      float c = cos(vK.y*1.5708), s = sin(vK.y*1.5708);
+      vec2 e = abs(vec2(q.x*c-q.y*s, q.x*s+q.y*c));
+      a += 0.6*exp(-min(e.x,e.y)*140.0)*exp(-max(e.x,e.y)*vK.z);
+    }
+  }
+  gl_FragColor = vec4(vCol.rgb*a*vCol.a, 1.0);
+}`;
+
+const galBgFsrc = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+${GAL_COMMON}
+uniform sampler2D uNoise;
+// Each octave is ROTATED as well as scaled. Without that, three axis-aligned
+// value-noise lattices stack into a visible square grid — the giveaway that the
+// clouds came out of a texture.
+float fbm(vec2 x){
+  mat2 M = mat2(0.80,0.60,-0.60,0.80);
+  float f  = texture2D(uNoise, x*0.5).r*0.52;      x = M*x*2.1;
+        f += texture2D(uNoise, x*0.5).g*0.30;      x = M*x*2.3;
+        f += texture2D(uNoise, x*0.5).b*0.18;
+  return f;
+}
+float hash(vec2 v){ return fract(sin(dot(v, vec2(12.9898,78.233)))*43758.5453); }
+void main(){
+  float t = uEnv.x, arrive = uEnv.z, over = uEnv.w, form = uForm;
+  vec2 fc = gl_FragCoord.xy;
+  vec2 d  = grot(fc-uGeo.xy, -uRot)/uGeo.z;
+  vec2 dp = vec2(d.x, d.y/uInc.x);            // back to the disc plane
+  // the cloud is TWICE the size before it forms and visibly falls inward. Without
+  // this the "formless" state has the same silhouette as the arrived one and
+  // nothing ever collapses.
+  float r = length(dp)*mix(0.55,1.0,form), th = atan(dp.y, dp.x);
+  float ph = gphase(r, th, t);
+  float armw = pow(max(0.5+0.5*cos(ARMS*ph),1e-4), 2.0);
+  armw *= 0.72 + 0.50*cos(th - t*PAT);        // and one arm is brighter than the other
+  // higher-frequency when unformed (a ragged cloud), low and smooth when settled.
+  // Screen space, like the mottle — sampled in dp this came out as diagonal
+  // brush strokes, which is the single most artificial thing the eye can spot.
+  float n = fbm(d*mix(1.5,0.75,form) + vec2(t*0.004,0.0));
+  float mot = fbm(d*2.9 + vec2(1.7,0.4));
+  // The lane's PHASE wanders, its amplitude does not. Multiplying noise into a
+  // band that pow(...,10) has made a few pixels wide just chops it into dashes;
+  // perturbing where the band *is* makes it meander, which is what dust does.
+  float dust = pow(max(0.5+0.5*cos(ARMS*(ph + DUSTOFF + 0.45*(mot-0.5))),1e-4), 6.0);
+
+  // The unresolved light of the disc. Without this the galaxy is a pile of dots;
+  // with it the dots sit IN something.
+  float disc = exp(-r*1.9);
+  // a real BAR, not a fat ellipse: 3.4:1 with blunted ends
+  float bl   = length(vec2(dp.x/3.4, dp.y));
+  float bar  = exp(-pow(bl,1.6)*4.2);
+  float glow = disc*(0.16+1.15*armw*form)*mix(0.45,1.0,form) + bar*0.62*form;
+  // Mottle it. Unresolved starlight is not an airbrush — a smooth analytic
+  // falloff reads as a soapy grey sheet that swamps the sprites sitting in it.
+  // The floor is radius-dependent: the inner disc mottles hard so the sprites
+  // have somewhere dark to be bright against, the outer disc stays smooth.
+  glow *= mix(0.30, 0.62, smoothstep(0.15,0.70,r)) + 0.55*mot;
+  glow *= 1.0 - 0.93*dust*form*smoothstep(0.05,0.32,r);
+  // TWO thin lanes flanking the bar's axis (note the nested abs) — the real
+  // signature of an SBb. One wide smear down the spine just dims the bar.
+  // confined by a TIGHTER envelope than the bar's own glow — at the bar's own
+  // 3.4:1 extent the two lanes ran the full width of the disc and read as a
+  // pair of scratches on the print
+  float bd = exp(-abs(abs(dp.y - dp.x*0.18) - 0.095)*26.0) * exp(-pow(bl,1.6)*11.0);
+  glow *= 1.0 - 0.78*bd*smoothstep(0.02,0.10,r)*form;
+
+  // three colour poles, not two: gold bulge, neutral mid-disc, cold blue rim.
+  // A straight violet->gold ramp is why the whole thing used to be one hue.
+  vec3 gcol = mix(mix(vec3(0.72,0.80,1.00), vec3(1.0,0.78,0.42), exp(-r*2.2)),
+                  vec3(0.24,0.38,0.80), smoothstep(0.20,0.85,r));
+  vec3 col = glow*gcol*0.30;
+  // The nucleus TIGHTENS rather than ignites: broad and dim at p=0, small and
+  // clipping-white at p=1. Gated on form it was simply off for the first third
+  // of the session, which left the early frame with no focal point at all — and
+  // a screensaver spends far more minutes near low p than at p=1.
+  col += exp(-r*mix(2.2,13.0,form))*vec3(1.0,0.87,0.64)*mix(0.42,0.85,form);
+  // nebula: colour arrives before structure, so mid-p is a glowing cloud. It is
+  // the PRE-formation state and mostly burns off — at p=1 the picture should be
+  // starlight, with pink only in the discrete HII knots.
+  // Early it is broad and has NO spiral in it — structure is the thing p is
+  // supposed to be delivering, so the cloud must not arrive already organised.
+  // one tap, not an fbm: hz is sampled at ~1 feature across the whole frame and
+  // only drives a colour selector, so octaves below the sampling scale are waste
+  float hz = texture2D(uNoise, fc/uRes.y*0.85 + vec2(0.0,t*0.002)).r;
+  float neb = n*n*exp(-r*mix(2.6,2.1,form))
+            * mix(1.0, pow(max(0.30+0.70*armw,1e-4),2.0), form);
+  // three poles, driven by a noise field, so the cloud is never one flat purple:
+  // cold teal in the thin parts, violet in the body, magenta where the arms are
+  vec3 nc = mix(vec3(0.10,0.22,0.46), vec3(0.42,0.14,0.54), smoothstep(0.25,0.75,hz));
+  nc = mix(nc, vec3(0.72,0.22,0.42), armw*form);
+  col += neb*nc*mix(0.85,0.32,form);
+  // a halo that is ROUND ON SCREEN, not in the disc plane — the inclined falloff
+  // leaves two clean black wedges perpendicular to the arm axis otherwise
+  // ...and it's MOTTLED. A smooth radial wash at the corner reads as a vignette
+  // artifact; a mottled one reads as an outer envelope the galaxy actually has.
+  float halo = exp(-length(d)*0.85);
+  col += halo*(0.45+0.95*mot)*vec3(0.042,0.048,0.088)*mix(0.5,1.0,form);
+  // faint everywhere-haze: no corner of this is allowed to be dead black
+  col += hz*vec3(0.022,0.017,0.048);
+  col += vec3(0.002,0.002,0.006);
+  // ARRIVED: an outer envelope, not a global brightness step. Over 90 minutes a
+  // gain bump is invisible; an envelope the galaxy didn't have before is not.
+  // tighter than the standing halo on purpose: at the halo's own 0.85 falloff
+  // this lifted the whole sky back to lavender, which reads as the exposure
+  // changing rather than as the galaxy gaining an envelope
+  col += exp(-length(d)*1.7)*vec3(0.070,0.090,0.190)*arrive;
+  col += exp(-r*1.3)*vec3(0.11,0.038,0.020)*over;     // OVERDUE: the air warms
+  vec2 v = fc/uRes-0.5; col *= 1.0-dot(v,v)*0.24;     // light — it darkens the corners
+  // Toe and shoulder, and let it clip. Without this nothing in the frame is
+  // black and nothing is white — the whole image sat in the middle of the
+  // histogram, which is the difference between an exposure and a painting.
+  // exponent ABOVE 1 — pow(c,0.92) brightens everything below 1 and lifted the
+  // whole sky to lavender, the exact opposite of the intent. >1 crushes the
+  // low end; the gain then pushes the bar and nucleus into the top decile.
+  col = pow(col, vec3(1.18))*1.40;
+  // dither. 2.5/255 not 1.5: the dark side of a dust lane is a very shallow
+  // gradient and at 1.5 it contoured into scalloped bands along the lane
+  col += (hash(fc)-0.5)/255.0*2.5;
+  gl_FragColor = vec4(col,1.0);
+}`;
+
+function link(vs, fs){
+  const pr = gl.createProgram();
+  gl.attachShader(pr, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(pr, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(pr);
+  if(!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+  return pr;
+}
+const galProg = link(galVsrc, galFsrc);
+const galBgProg = link(vsrc, galBgFsrc);
+const galBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, galBuf);
+gl.bufferData(gl.ARRAY_BUFFER, gdata, gl.STATIC_DRAW);
+const galLoc = {
+  aA: gl.getAttribLocation(galProg,'aA'), aB: gl.getAttribLocation(galProg,'aB'),
+  u: n => gl.getUniformLocation(galProg, n), b: n => gl.getUniformLocation(galBgProg, n),
+};
+const galBgPos = gl.getAttribLocation(galBgProg,'pos');
+
+// Inclination + roll. The point of the roll is that the major axis runs corner
+// to corner instead of lying flat across a portrait screen.
+const INC = 1.06;                       // radians from face-on
+function galUniforms(pr, t, get){
+  gl.uniform2f(get('uRes'), glCanvas.width, glCanvas.height);
+  gl.uniform3f(get('uGeo'), glCanvas.width*0.5, glCanvas.height*0.47,
+                            Math.max(glCanvas.width, glCanvas.height)*0.68);
+  gl.uniform4f(get('uEnv'), t, p, arrive, over);
+  gl.uniform2f(get('uInc'), Math.cos(INC), Math.sin(INC));
+  gl.uniform1f(get('uRot'), -0.62);
+  gl.uniform1f(get('uForm'), late(p));
+}
+
+function galaxy(t){
+  gl.viewport(0,0,glCanvas.width,glCanvas.height);
+  gl.disable(gl.BLEND);
+  gl.useProgram(galBgProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, fsBuf);
+  gl.enableVertexAttribArray(galBgPos);
+  gl.vertexAttribPointer(galBgPos,2,gl.FLOAT,false,0,0);
+  galUniforms(galBgProg, t, galLoc.b);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, noiseTex);
+  gl.uniform1i(galLoc.b('uNoise'), 0);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.useProgram(galProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, galBuf);
+  gl.enableVertexAttribArray(galLoc.aA); gl.vertexAttribPointer(galLoc.aA,4,gl.FLOAT,false,32,0);
+  gl.enableVertexAttribArray(galLoc.aB); gl.vertexAttribPointer(galLoc.aB,4,gl.FLOAT,false,32,16);
+  galUniforms(galProg, t, galLoc.u);
+  gl.uniform1f(galLoc.u('uPx'), PX);
+  gl.drawArrays(gl.POINTS, 0, GN);
+  gl.disableVertexAttribArray(galLoc.aB);
+  gl.disable(gl.BLEND);
+}
 // --- TIDE ----------------------------------------------------------------
 // Two arcs that OVERLAP on purpose. The tide comes in and stops at mid-screen
 // (past that the sea eats the sky and there is nowhere left for a sunrise to
@@ -946,9 +1251,7 @@ function resize(){
   }
   glAspect = glCanvas.width/glCanvas.height;
   gl.viewport(0,0,glCanvas.width,glCanvas.height);
-  gl.uniform2f(uRes, glCanvas.width, glCanvas.height);
   W = c2dCanvas.width; H = c2dCanvas.height;
-  ridge.width = Math.max(1, Math.floor(W*0.25)); ridge.height = Math.max(1, Math.floor(H*0.25));
   ctx.setTransform(1,0,0,1,0,0);
 }
 addEventListener('resize', resize); resize();
