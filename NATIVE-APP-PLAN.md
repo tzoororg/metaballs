@@ -6,8 +6,10 @@ Goal: turn the metaballs animation (currently a GitHub Pages web page) into a
 animations and a photo carousel later. No Play Store — `adb install` only.
 
 Decisions (from the user): **Both** mechanisms (DreamService + Live Wallpaper),
-**no launcher icon** (configure from Android's own Screen-saver / Wallpaper
-settings screens).
+originally **no launcher icon**. **Revised 2026-07-25:** MIUI blocks third-party
+DreamServices from starting, so a launcher icon (`MetaballsActivity`, fullscreen
+WebView) was added as the working manual-launch path, and the Live Wallpaper is
+now the real "shows up by itself" surface — see `LIVE-WALLPAPER-PLAN.md`.
 
 ---
 
@@ -155,7 +157,9 @@ sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 and verified (see "Build environment" above). Only remaining check —
 `gradlew tasks` — happens once the wrapper is scaffolded in Phase 1.
 
-**Phase 1 — DreamService screensaver (reuses `index.html`).** *Ships the core ask.*
+**Phase 1 — DreamService screensaver (reuses `index.html`). ✅ DONE 2026-07-24**
+(builds and installs; MIUI refuses to *start* it without the appop grant — hence
+the launcher Activity added 2026-07-25).
 1. Scaffold minimal Gradle project under `/android` (no launcher activity).
 2. `MetaballsDream extends DreamService`: full-screen WebView, `WebViewAssetLoader`
    serving bundled `index.html`, `setWebContentsDebuggingEnabled(true)` in debug.
@@ -167,7 +171,7 @@ and verified (see "Build environment" above). Only remaining check —
    the phone** via chrome-devtools-mcp attached to the WebView (screenshot +
    console) and an `adb screencap` of the live Dream.
 
-**Phase 2 — Live Wallpaper (native GLES metaballs).**
+**Phase 2 — Live Wallpaper (native GLES metaballs). → detailed in `LIVE-WALLPAPER-PLAN.md`.**
 1. `MetaballsWallpaper extends WallpaperService`; GLES2 context on the engine
    Surface; paste `fsrc` as the fragment shader; port the JS motion loop to Kotlin.
 2. `onVisibilityChanged` pause/resume; FPS cap; wallpaper settings activity.
