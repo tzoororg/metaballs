@@ -7,9 +7,10 @@ import android.view.WindowManager
 import android.webkit.WebView
 
 /**
- * Launcher icon -> fullscreen metaballs. Same WebView as the Dream; exists
- * because MIUI blocks third-party DreamServices from actually starting.
- * Back button exits; that's the only control.
+ * Launcher icon -> evolve.html: a setup screen (duration + scene) then a
+ * fullscreen session that grows over that timer. Same WebView as the Dream
+ * (which stays on index.html); exists because MIUI blocks third-party
+ * DreamServices from actually starting. Back button exits.
  */
 class MetaballsActivity : Activity() {
 
@@ -32,7 +33,7 @@ class MetaballsActivity : Activity() {
         val wv = metaballsWebView(this)
         webView = wv
         setContentView(wv)
-        wv.loadUrl(METABALLS_URL)
+        wv.loadUrl(EVOLVE_URL)
     }
 
     override fun onDestroy() {

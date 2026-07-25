@@ -4,7 +4,7 @@
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:icon="@android:drawable/ic_menu_gallery"
+        android:icon="@drawable/ic_evolve"
         android:hardwareAccelerated="true">
 
         <activity

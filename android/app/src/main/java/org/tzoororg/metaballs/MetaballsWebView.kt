@@ -16,6 +16,10 @@ import androidx.webkit.WebViewAssetLoader
 const val METABALLS_URL =
     "https://appassets.androidplatform.net/assets/index.html?fps=30&scale=0.5"
 
+/** The launcher app: setup screen (duration + scene) then a timed session. */
+const val EVOLVE_URL =
+    "https://appassets.androidplatform.net/assets/evolve.html?fps=30&scale=0.5"
+
 /** Shared by the Dream and the launcher Activity — same WebView, same asset. */
 fun metaballsWebView(context: Context): WebView {
     val assetLoader = WebViewAssetLoader.Builder()

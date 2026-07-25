@@ -47,6 +47,7 @@ dependencies {
 // ponytail: no incremental/watch wiring — Copy task re-runs each build, cheap for one file.
 tasks.register<Copy>("copyIndexHtml") {
     from(rootProject.projectDir.parentFile.resolve("index.html"))
+    from(rootProject.projectDir.parentFile.resolve("evolve.html"))
     into(layout.projectDirectory.dir("src/main/assets"))
 }
 

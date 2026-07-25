@@ -3,5 +3,6 @@ local.properties
 build/
 app/build/
 app/src/main/assets/index.html
+app/src/main/assets/evolve.html
 *.iml
 .idea/
