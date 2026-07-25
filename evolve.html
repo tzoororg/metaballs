@@ -91,10 +91,9 @@
     <p class="lbl">Scene</p>
     <nav id="tabs" aria-label="Scene">
       <button data-scene="0" aria-pressed="true">Metaballs</button>
-      <button data-scene="1" aria-pressed="false">Dawn</button>
-      <button data-scene="2" aria-pressed="false">Galaxy</button>
-      <button data-scene="3" aria-pressed="false">Tide</button>
-      <button data-scene="4" aria-pressed="false">Crystal</button>
+      <button data-scene="1" aria-pressed="false">Galaxy</button>
+      <button data-scene="2" aria-pressed="false">Tide</button>
+      <button data-scene="3" aria-pressed="false">Crystal</button>
     </nav>
     <button id="start">Start</button>
     <p id="hint">Double-tap the animation to come back here</p>
@@ -158,8 +157,8 @@ const tabs = document.getElementById('tabs');
 function setScene(n){
   scene = n;
   [...tabs.querySelectorAll('button')].forEach(b => b.setAttribute('aria-pressed', +b.dataset.scene === n));
-  glCanvas.hidden  = n > 1;
-  c2dCanvas.hidden = n <= 1;
+  glCanvas.hidden  = n > 0;
+  c2dCanvas.hidden = n === 0;
 }
 tabs.addEventListener('click', e => {
   const b = e.target.closest('button'); if(b) setScene(+b.dataset.scene);
@@ -194,7 +193,7 @@ function setMins(n){
   [...minsNav.querySelectorAll('button')].forEach(b => b.setAttribute('aria-pressed', +b.dataset.min === n));
 }
 setMins(mins);
-if(qs.has('scene')) setScene(Math.max(0, Math.min(4, +qs.get('scene') || 0)));
+if(qs.has('scene')) setScene(Math.max(0, Math.min(3, +qs.get('scene') || 0)));
 minsNav.addEventListener('click', e => {
   const b = e.target.closest('button'); if(b) setMins(+b.dataset.min);
 });
@@ -215,7 +214,7 @@ for(const c of [glCanvas, c2dCanvas]) c.addEventListener('dblclick', () => {
   setup.hidden = false;
 });
 
-// ===== WebGL: metaballs + dawn (same field, different palette) =====
+// ===== WebGL: metaballs =====
 const gl = glCanvas.getContext('webgl', {antialias:true});
 const MAX = 14;
 
@@ -227,11 +226,10 @@ precision mediump float;
 #endif
 uniform vec2  uRes;
 uniform float uTime, uP, uArrive, uOver;
-uniform int   uStyle, uCount;
+uniform int   uCount;
 uniform vec3  uBalls[${MAX}];
 
 float hash(vec2 v){ return fract(sin(dot(v, vec2(12.9898,78.233)))*43758.5453); }
-float S(float a, float b){ return smoothstep(a,b,uP); }
 
 void main(){
   vec2 uv = gl_FragCoord.xy / uRes.xy;
@@ -250,8 +248,7 @@ void main(){
   float glow = clamp(f,0.0,2.0);
   vec3 col;
 
-  if(uStyle==0){
-    // NEON — evolution is density; palette warms and the halo swells so a
+  // NEON — evolution is density; palette warms and the halo swells so a
     // glance reads progress without counting blobs.
     vec3 bg = mix(vec3(0.012,0.010,0.028), vec3(0.05,0.02,0.075), e);
     float w = 0.5+0.5*sin(uTime*0.18 + uv.x*3.2 + uv.y*2.4);
@@ -276,48 +273,6 @@ void main(){
     // gets slowly redder, which is what tells you it's been done a long while.
     col += vec3(0.055,0.012,0.030)*uOver;
     col += vec3(0.30,0.10,0.16)*pow(glow,2.5)*0.05*uOver;
-  } else {
-    // DAWN — the field barely changes; the SKY does. Night -> sunrise.
-    // Real dawn keeps the zenith dark and puts the fire at the horizon;
-    // brightening the whole sky just washes out (and lights up the room).
-    float y = uv.y;
-    vec3 top = mix(vec3(0.006,0.010,0.032), vec3(0.020,0.030,0.085), e);
-    vec3 mid = mix(vec3(0.015,0.016,0.050), vec3(0.170,0.075,0.230), e);
-    vec3 low = mix(vec3(0.030,0.018,0.045), vec3(0.900,0.330,0.140), e);
-    vec3 bg  = mix(mid, top, smoothstep(0.30,1.0,y));
-    bg = mix(bg, low, exp(-y*mix(16.0,3.2,e)));           // horizon fire climbing
-
-    // ARRIVED: the sun's limb clears the horizon. The sky needed no other
-    // "done" cue — a sun is unmistakable, and it is a *state*: still there,
-    // just higher, if you walk in an hour late. Added to bg, not over the top,
-    // so the cloud bank passes in front of it.
-    vec2  sp = vec2(0.62*aspect, 0.075 + 0.19*uOver);
-    float sd = length(q - sp);
-    bg += vec3(1.0,0.58,0.26)*exp(-sd*mix(12.0,6.0,uOver))*0.45*uArrive;
-    // 1.0-smoothstep(lo,hi,x), never smoothstep(hi,lo,x): reversed edges are
-    // undefined in GLSL ES and this Mali renders them as a hard-edged wedge.
-    bg  = mix(bg, vec3(1.0,0.93,0.80), (1.0-smoothstep(0.042,0.058,sd))*uArrive*0.92);
-    // OVERDUE: full daybreak — the zenith finally takes some blue.
-    bg  = mix(bg, bg + vec3(0.03,0.06,0.12)*smoothstep(0.25,1.0,y), uOver);
-
-    // stars, fading out as the sky lifts
-    vec2  cell = floor(gl_FragCoord.xy/3.0);
-    float star = step(0.9975, hash(cell)) * (0.4+0.6*hash(cell+7.0));
-    star *= (1.0-S(0.15,0.75)) * smoothstep(0.15,0.6,y);
-    bg += vec3(0.8,0.85,1.0)*star*0.55;
-
-    // blobs read as distant cloud banks: cool and dim at night, lit from below at dawn
-    vec3 c = mix(vec3(0.20,0.26,0.45), vec3(1.0,0.62,0.34), e);
-    c = mix(c, vec3(1.0,0.80,0.55), exp(-y*4.0)*e);       // underlit rims near horizon
-    // blended toward the local sky, not painted over it — an opaque fill here
-    // reads as flat discs stuck on the gradient
-    vec3 cloud = mix(bg, c, mix(0.22,0.45,e));
-    col  = bg;
-    col += c*pow(glow,1.6)*mix(0.04,0.09,e);
-    col  = mix(col, cloud, edge*0.9);
-    // a strong rim is what turns a cloud silhouette back into a hard-edged disc
-    col += rim*c*mix(0.12,0.28,e);
-  }
 
   vec2 v = uv-0.5;
   col *= 1.0 - dot(v,v)*0.35;
@@ -343,7 +298,7 @@ gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_
 const aloc = gl.getAttribLocation(prog,'pos');
 gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc,2,gl.FLOAT,false,0,0);
 const U = n => gl.getUniformLocation(prog,n);
-const uRes=U('uRes'), uTime=U('uTime'), uP=U('uP'), uStyle=U('uStyle'),
+const uRes=U('uRes'), uTime=U('uTime'), uP=U('uP'),
       uBalls=U('uBalls'), uCount=U('uCount'), uArrive=U('uArrive'), uOver=U('uOver');
 
 const balls = [];
@@ -358,22 +313,9 @@ const ballData = new Float32Array(MAX*3);
 let glAspect = 1;
 
 function drawGL(dt, t){
-  // Dawn keeps a small, near-constant field on purpose — the SKY is the evolution,
-  // so the blobs must never grow big enough to hide it.
-  const dawn = scene === 1;
-  // Dawn: MORE, SMALLER blobs than you'd guess. Six fat ones in a thin band sum
-  // into a single convex dome with a hard bright rim — a planet, the exact thing
-  // the low band was meant to avoid. Ten small ones give a lumpy ridge instead.
-  const count = dawn ? Math.max(3, Math.round(lerp(3,8,ease(p))))
-                     : Math.max(1, Math.round(lerp(1, MAX, late(p))));
+  const count = Math.max(1, Math.round(lerp(1, MAX, late(p))));
   // radius shrinks as count grows, or 14 balls fuse into one featureless mass at p=1
-  // Dawn's blobs are squeezed into the bottom band and enlarged so they MERGE
-  // into one ragged cloud bank. Free-floating circles in a sky read as planets.
-  // OVERDUE: the blobs fatten again and re-merge. Colour alone was too subtle a
-  // cue for "very late" here — density is the thing this scene reads by.
-  // Dawn's radii must stay BELOW the x-slot spacing (see below) or the caps fuse
-  // into one smooth arc instead of a scalloped ridge.
-  const rs = dawn ? 0.78 : lerp(1.5, 0.6, late(p)) * (1 + 0.28*over);
+  const rs = lerp(1.5, 0.6, late(p)) * (1 + 0.28*over);
   for(let i=0;i<count;i++){
     const b = balls[i];
     const ca = Math.cos(b.spin*dt), sa = Math.sin(b.spin*dt);
@@ -381,24 +323,14 @@ function drawGL(dt, t){
     b.x += b.vx*0.055*dt; b.y += b.vy*0.055*dt;
     if(b.x<0.02){b.x=0.02;b.vx=Math.abs(b.vx);} if(b.x>0.98){b.x=0.98;b.vx=-Math.abs(b.vx);}
     if(b.y<0.02){b.y=0.02;b.vy=Math.abs(b.vy);} if(b.y>0.98){b.y=0.98;b.vy=-Math.abs(b.vy);}
-    // Dawn pins each blob to its own x slot and lets it drift only a little.
-    // Free-roaming x means they periodically all bunch up and the ridge becomes
-    // a single dome again — the silhouette has to be reliable, not usually-ok.
-    ballData[i*3]   = (dawn ? (i+0.5)/count + (b.x-0.5)*0.11 : b.x) * glAspect;
-    // Dawn's centres sit BELOW the bottom edge, so only the upper caps show and
-    // the silhouette is a scalloped ridge. Any band with centres on-screen sums
-    // into a closed convex dome no matter how the radii are tuned — that shape
-    // is what reads as a planet.
-    ballData[i*3+1] = dawn ? -0.045 + b.y*0.085 : b.y;
-    // the two "big" balls dominate the sum and pull the dawn band back into one
-    // convex dome, so they are cut down hard there — the ridge needs peers, not a lead
-    ballData[i*3+2] = b.r * (dawn && i<2 ? 0.48 : rs);
+    ballData[i*3]   = b.x * glAspect;
+    ballData[i*3+1] = b.y;
+    ballData[i*3+2] = b.r * rs;
   }
   gl.uniform3fv(uBalls, ballData);
   gl.uniform1i(uCount, count);
   gl.uniform1f(uTime, t); gl.uniform1f(uP, p);
   gl.uniform1f(uArrive, arrive); gl.uniform1f(uOver, over);
-  gl.uniform1i(uStyle, scene);
   gl.drawArrays(gl.TRIANGLES,0,3);
 }
 
@@ -543,88 +475,316 @@ function galaxy(t){
 }
 
 // --- TIDE ----------------------------------------------------------------
-// No sine-wave polygons — those read as clip art. A night sea is a dark plane,
-// a glowing horizon, and a moonpath of specular glints; that's all it takes.
-function tide(t){
-  // OVERDUE: the tide keeps coming in and the moon keeps climbing. Same two
-  // mechanisms the growth already used, just continued — so "very late" is
-  // legible from the horizon line alone, without a new visual idea.
-  const lv   = lerp(0.10, 0.74, ease(p)) + 0.10*over;
-  const yTop = H*(1-lv);
-  const moonX = W*0.63, moonR = Math.min(W,H)*0.035;
-  const moonY = yTop*lerp(0.42, 0.26, over);
-  const bright = lerp(0.25,1.0,ease(p));
+// Two arcs that OVERLAP on purpose. The tide comes in and stops at mid-screen
+// (past that the sea eats the sky and there is nowhere left for a sunrise to
+// happen); the sky starts warming while the water is still rising, so the
+// second idea is already under way before the first one finishes. No cut.
+// No sine-wave polygons anywhere — those read as clip art. A sea is a dark
+// plane, a lit horizon, and a column of specular glints; the sky does the rest.
 
-  // sky: dark at the zenith, warmed only near the water
+// Sky as five colour stops interpolated between three whole palettes. One
+// gradient per frame; the entire night->dawn->morning arc is a mix() on this
+// table, which is why the sky never has a moment that looks composited.
+const SKY_AT = [0, 0.40, 0.66, 0.86, 1];
+const SKY_N  = [[2,4,12],[5,8,24],[10,16,38],[18,28,54],[30,42,70]];        // night
+const SKY_W  = [[12,18,74],[52,42,116],[146,68,118],[236,120,86],[255,198,124]]; // dawn
+const SKY_D  = [[28,76,160],[70,120,196],[138,168,214],[226,192,158],[255,226,176]]; // morning
+const mix3 = (a,b,x) => [a[0]+(b[0]-a[0])*x, a[1]+(b[1]-a[1])*x, a[2]+(b[2]-a[2])*x];
+const css  = c => `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const rgbs = c => `${c[0]|0},${c[1]|0},${c[2]|0}`;
+// a stretched radial. Clouds are wide and flat and a circle never reads as one
+function hazeE(x,y,rx,ry,rgb,a){
+  ctx.save(); ctx.translate(x,y); ctx.scale(1, ry/rx);
+  haze(0,0,rx,rgb,a); ctx.restore();
+}
+// Cloud strata: packed toward the horizon (pow biases low), each drifting at
+// its own rate so the bank never reads as one rigid sheet sliding past.
+// Wide and THIN (th caps at 0.09): a stratum whose height approaches its width
+// is a puff, and puffs floating over an ocean read as the blobs this scene was
+// built to replace.
+// Eight, not thirteen: at 13 the band was a stack of lens streaks. And the
+// thinnest are gone (th floors at 0.045) — below that an ellipse is a scratch.
+const CLOUDS = Array.from({length:8}, (_,i) => ({
+  h: 0.015 + Math.pow(rnd(i,71),2.0)*0.50,
+  x: rnd(i,72),
+  w: 0.22 + rnd(i,73)*0.42,
+  th: 0.045 + rnd(i,74)*0.055,
+  v: (0.0025 + rnd(i,75)*0.006) * (rnd(i,76) > 0.5 ? 1 : -1),
+}));
+
+function tide(t){
+  // Arc 1: the flood, done by p=0.62 and then held.
+  const flood = ease(clamp01(p/0.62));
+  const lv    = lerp(0.10, 0.50, flood) + 0.045*over;
+  const yTop  = H*(1-lv);
+  // Arc 2: light first (it starts at 0.38, inside the flood), disc much later.
+  const light = stage(0.38, 0.95);
+  const rise  = stage(0.60, 1.00) + 0.30*arrive + 1.1*over;
+  const sunX  = W*0.655, moonX = W*0.24;
+  const sunR  = Math.min(W,H)*0.050;
+  // low sun flattens — refraction. Costs one lerp and is the detail that makes
+  // people say a render "looks photographed"
+  const squash = lerp(0.78, 1.0, clamp01(rise*1.3));
+  const sunY  = yTop + sunR*1.25 - sunR*2.5*rise;
+  const skyC  = SKY_N.map((n,i) => mix3(mix3(n, SKY_W[i], light), SKY_D[i], over*0.85));
+  const hor   = skyC[4];
+
+  // ---- sky
   const sky = ctx.createLinearGradient(0,0,0,yTop);
-  sky.addColorStop(0,   `rgb(${3+6*p|0},${5+8*p|0},${14+18*p|0})`);
-  sky.addColorStop(0.75,`rgb(${8+16*p|0},${12+20*p|0},${30+35*p|0})`);
-  sky.addColorStop(1,   `rgb(${20+50*p|0},${28+55*p|0},${55+60*p|0})`);
+  SKY_AT.forEach((a,i) => sky.addColorStop(a, css(skyC[i])));
   ctx.fillStyle = sky; ctx.fillRect(0,0,W,yTop+2);
 
   ctx.globalCompositeOperation = 'lighter';
-  const ns = Math.round(lerp(20,260,p));
+  // stars: they come out as the night deepens, then the dawn takes them
+  // starts at 140, not 20: the deep-night frame has the least to look at, so it
+  // cannot also be the least starry. Dawn still takes them, via the pow() below.
+  const ns = Math.round(lerp(140,260,p));
   for(let i=0;i<ns;i++){
-    const y = rnd(i,7)*yTop*0.96;
-    ctx.globalAlpha = (0.20+0.6*rnd(i,8)) * (0.6+0.4*Math.sin(t*1.3+i)) * (1-0.35*p);
+    // squared, not linear: stars are gone long before the sky is bright, and a
+    // star field surviving into a pink sky is the tell of a fake dawn
+    ctx.globalAlpha = (0.20+0.6*rnd(i,8)) * (0.6+0.4*Math.sin(t*1.3+i)) * Math.pow(1-light,2.2);
     ctx.fillStyle = '#dfe8ff';
-    ctx.fillRect(rnd(i,9)*W, y, 1.3*PX, 1.3*PX);
+    ctx.fillRect(rnd(i,9)*W, rnd(i,7)*yTop*0.96, 1.3*PX, 1.3*PX);
   }
   ctx.globalAlpha = 1;
-  haze(moonX, moonY, moonR*16, '140,175,255', 0.055*bright);  // outer halo
-  haze(moonX, moonY, moonR*5.0, '190,210,255', 0.30*bright);  // inner halo
-  ctx.globalAlpha = lerp(0.45,0.85,ease(p));                  // a crisp disc, not a smudge
-  ctx.fillStyle = '#f2f5ff';
-  ctx.beginPath(); ctx.arc(moonX, moonY, moonR, 0, 6.2832); ctx.fill();
-  ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = 'source-over';
 
-  // water body: nearly black, slightly denser with depth
+  // ---- moon: owns the first half, then washes out in the growing light.
+  // It sets as the sun rises — the two are never both the subject.
+  const moonR = Math.min(W,H)*0.032;
+  const moonY = yTop*lerp(0.40, 0.14, light);
+  // A clean exit, not a fade to a smudge. Held at ~0.05 the moon is too faint to
+  // read as a moon and too present not to look like screen burn; the arc is the
+  // moon HANDING the sky to the sun, and a hand-off means leaving.
+  const mv = Math.pow(1-light,1.8)*lerp(0.35,1.0,ease(p))
+           * (1 - ease(clamp01((light-0.55)/0.23)));
+  if(mv > 0.01){
+    haze(moonX, moonY, moonR*16, '140,175,255', 0.050*mv);
+    haze(moonX, moonY, moonR*5.0, '190,210,255', 0.28*mv);
+    ctx.globalAlpha = 0.85*mv;
+    ctx.fillStyle = '#f2f5ff';
+    ctx.beginPath(); ctx.arc(moonX, moonY, moonR, 0, 6.2832); ctx.fill();
+    // terminator: one offset disc of the sky behind it. A flat white circle is a
+    // hole punched in the sky; a phase is the cheapest thing that makes it a body.
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 0.30*mv;
+    ctx.fillStyle = css(mix3(skyC[1], skyC[2], 0.5));
+    ctx.beginPath(); ctx.arc(moonX - moonR*0.62, moonY - moonR*0.30, moonR*0.94, 0, 6.2832); ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- the light itself, before there is anything to see it come from.
+  // Three nested hazes: the whole eastern sky, the glow, then the core.
+  haze(sunX, yTop, W*1.30, '255,150,80', 0.11*light);
+  haze(sunX, sunY + sunR*0.6, W*0.52, '255,168,86', 0.20*light);
+  haze(sunX, sunY, sunR*7.5, '255,206,140', 0.30*light*light);
+
+  // ---- crepuscular rays. One radial gradient, N wedges, one fill — the fan is
+  // essentially free. The hard part is restraint: an even fan of equal wedges
+  // spanning the sky is a rising-sun FLAG, not weather. So: irregular angles and
+  // widths, a narrow arc, alpha low enough to be felt and not seen, and the
+  // gradient dies at 0.55 of the diagonal so nothing reaches the zenith. They
+  // also fade as the sun clears the water — shafts are a low-sun phenomenon.
+  const rayK = light*light*(1 - 0.75*clamp01(rise));
+  if(rayK > 0.02){
+    const L = Math.max(W,H)*0.62;
+    // inner stop at 2.5R, not 0.9R: the apex must never converge to a point, or
+    // the narrowest wedge is a 1px line running the height of the sky
+    const g = ctx.createRadialGradient(sunX,sunY,sunR*2.5,sunX,sunY,L);
+    // A wedge has hard straight sides no matter how it is coloured, so the only
+    // safe place for this effect is below the threshold where the eye resolves
+    // an edge. Felt, not seen.
+    g.addColorStop(0,   `rgba(255,226,178,${0.030*rayK})`);
+    g.addColorStop(0.35,`rgba(255,204,150,${0.013*rayK})`);
+    g.addColorStop(1,   'rgba(255,190,140,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    for(let i=0;i<5;i++){
+      // rnd on the angle too — evenly spaced shafts are the giveaway
+      const a = -1.57 + (rnd(i,80)-0.5)*2.0 + Math.sin(t*0.045 + i*2.1)*0.04;
+      // half-width FLOORED. Below ~0.045 rad the wedge is pixel-thin over most
+      // of its length and reads as a scratch on the screen, at any alpha — a
+      // hard edge against a smooth gradient always resolves.
+      const w = 0.045 + rnd(i,81)*0.05;
+      ctx.moveTo(sunX, sunY);
+      ctx.lineTo(sunX + Math.cos(a-w)*L, sunY + Math.sin(a-w)*L);
+      ctx.lineTo(sunX + Math.cos(a+w)*L, sunY + Math.sin(a+w)*L);
+    }
+    ctx.fill();
+  }
+
+  // ---- the disc. Drawn BEFORE the water, so the sea hides the submerged half
+  // and the sun genuinely comes UP OUT of it rather than fading in above it.
+  if(rise > 0.005){
+    const k = clamp01(rise*4);
+    // bloom that hugs the limb. Without it the disc is a white sticker; the
+    // blown-out skirt around the edge is most of what makes a sun look hot.
+    haze(sunX, sunY, sunR*3.4, '255,232,186', 0.42*k);
+    haze(sunX, sunY, sunR*1.55, '255,244,214', 0.40*k);
+    ctx.save();
+    ctx.translate(sunX, sunY); ctx.scale(1, squash);
+    ctx.globalAlpha = k;
+    // one gradient, not two flat fills: a low sun is white at the centre and
+    // reddens toward the limb, and that fall-off is what stops it being a sticker
+    const d = ctx.createRadialGradient(0,0,0, 0,0,sunR);
+    d.addColorStop(0,   '#fffdf4');
+    d.addColorStop(0.72,'#ffeec0');
+    d.addColorStop(1,   '#ffd48e');
+    ctx.fillStyle = d;
+    ctx.beginPath(); ctx.arc(0,0,sunR,0,6.2832); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  // ---- cloud strata. Dark body in source-over (a cloud is a denser patch of
+  // sky, never a hole in it), warm rim in lighter and only on the BOTTOM edge —
+  // underlighting is the entire difference between a lit cloud and a painted one.
+  const body = rgbs(mix3(mix3([14,20,40], [58,36,62], light), [120,130,155], over*0.8));
+  ctx.globalCompositeOperation = 'source-over';
+  const drawn = [];
+  for(const c of CLOUDS){
+    const cy = yTop - yTop*c.h;
+    const cw = W*c.w, ch = cw*c.th;
+    const cx = (((c.x + t*c.v) % 1 + 1) % 1)*W*1.5 - W*0.25;
+    // Thinned out with altitude. The stacked-lobe trick rescues the low bank,
+    // but a high stratum is a lone thin ellipse cut off by the frame edge — a
+    // lens streak. Deletion by exponent: the top few effectively vanish.
+    const alt = Math.exp(-c.h*1.8);
+    hazeE(cx, cy, cw, ch, body, (0.20 + 0.30*light)*alt);
+    // a second, smaller lobe riding on top and offset along the length. One
+    // extra ellipse buys a lumpy top edge, which is the whole difference between
+    // vapour and a lens streak — a single ellipse is always a smear.
+    hazeE(cx + cw*0.18, cy - ch*0.5, cw*0.6, ch*0.7, body, (0.16 + 0.24*light)*alt);
+    drawn.push({cx,cy,cw,ch,h:c.h});
+  }
+  ctx.globalCompositeOperation = 'lighter';
+  for(const c of drawn){
+    // lit hardest near the sun and near the horizon, which is what gives the
+    // bank depth instead of eight equally-bright stripes
+    const lit = light*light * Math.exp(-Math.abs(c.cx-sunX)/W*1.5) * Math.exp(-c.h*2.0);
+    if(lit < 0.004) continue;
+    // the rim must be SHORTER than the body, or the underlight is just a second
+    // streak parked below the first
+    hazeE(c.cx, c.cy + c.ch*0.55, c.cw*0.55, c.ch*0.6,  '255,150,80',  0.46*lit);
+    hazeE(c.cx, c.cy + c.ch*0.80, c.cw*0.35, c.ch*0.24, '255,226,180', 0.55*lit);
+  }
+
+  // ---- water: it reflects the sky it sits under, so its top stop is derived
+  // from the horizon colour rather than being its own hand-tuned palette.
+  ctx.globalCompositeOperation = 'source-over';
+  // The sea reflects the sky DIRECTLY ABOVE IT — which away from the sun is the
+  // violet mid-sky, not the gold at the horizon. Tinting the whole sea with the
+  // horizon colour is what turned it into a sheet of brown fog; the gold belongs
+  // only in the road, and the road is additive.
+  const sea = mix3(skyC[2], hor, 0.30);
+  // The near water has to be allowed OUT of midnight. With a hardcoded black
+  // floor, a full-morning sky sat on a night sea — a contradiction the eye
+  // catches instantly, and it made the bottom 40% of every frame dead.
+  const day = clamp01(light*0.35 + over);
   const wat = ctx.createLinearGradient(0,yTop,0,H);
-  wat.addColorStop(0,   `rgba(${10+16*p|0},${20+26*p|0},${38+34*p|0},1)`);
-  wat.addColorStop(0.25,`rgba(${4+7*p|0},${9+11*p|0},${20+16*p|0},1)`);
-  wat.addColorStop(1,   'rgba(1,2,6,1)');
+  wat.addColorStop(0,    css(mix3(sea,[10,16,34],0.10)));
+  // steeper falloff at 0.09 (0.58 -> 0.45) so the sheet has a value change in it
+  // and doesn't read as painted drywall
+  wat.addColorStop(0.09, css(mix3(sea,[8,14,30],0.45)));
+  wat.addColorStop(0.40, css(mix3(sea,[3,7,18],lerp(0.90,0.62,clamp01(light*0.5+over)))));
+  // BLUE, not neutral: [16,24,44] mixed down landed on aluminium, and a morning
+  // sea that isn't blue is the one thing nobody forgives
+  wat.addColorStop(1,    css(mix3([1,2,6],[12,30,62],day)));
   ctx.fillStyle = wat; ctx.fillRect(0,yTop,W,H-yTop);
 
   ctx.globalCompositeOperation = 'lighter';
-  // horizon: a soft band, not a drawn line
-  haze(W*0.5, yTop, W*0.9, '120,160,220', 0.10*bright);
-  haze(moonX, yTop, W*0.30, '200,215,255', 0.16*bright);
-
-  // moonpath — glints widen with distance from the horizon (perspective cone)
-  const ng = Math.round(lerp(90, 320, ease(p)));
-  for(let i=0;i<ng;i++){
-    const u  = Math.pow(rnd(i,31), 1.8);              // packed near the horizon
-    const y  = yTop + u*(H-yTop);
-    const dz = u + 0.04;
-    const cone = W*(0.06 + 0.55*dz);
-    const off  = (rnd(i,32)-0.5)*cone
-               + Math.sin(t*0.6 + i*0.7)*cone*0.06;   // slow lateral swim
-    const x = moonX + off;
-    const fall = Math.exp(-Math.pow(off/(cone*0.55),2));
-    const w = (1.5 + 26*dz*rnd(i,33)) * PX;
-    const h = Math.max(1, 1.6*dz*PX);
-    const flick = 0.35 + 0.65*Math.pow(Math.abs(Math.sin(t*1.1 + i*2.3)), 2.5);
-    ctx.globalAlpha = fall*flick*lerp(0.10,0.42,ease(p))*(1+0.55*arrive);
-    ctx.fillStyle = '#cfe0ff';
-    ctx.fillRect(x-w/2, y, w, h);
+  // Swell: distance compresses the spacing, which is the only cue that says
+  // "this plane recedes" — without it the sea is a flat wall of gradient.
+  // BROKEN INTO SEGMENTS: a crest running the full width of the screen is a
+  // CRT scanline, not a wave. Same fill count, and the gaps give the empty
+  // middle of the sea something to be.
+  // Only the far half. Down here the crests are wide enough to read and the
+  // spacing is compressed enough to mean something; in the near field the same
+  // marks were faint horizontal scratches on an otherwise clean plane. Drawing
+  // them at invisible alpha everywhere was the one non-choice.
+  ctx.fillStyle = css(mix3([170,200,255],[255,214,170],light));
+  for(let i=0;i<18;i++){
+    const u = Math.pow((i+0.6)/18, 2.3);
+    if(u > 0.5) break;
+    const y = yTop + u*(H-yTop) + Math.sin(t*0.25 + i*1.7)*(H-yTop)*0.004;
+    const h = Math.max(1, u*2.6*PX);
+    for(let k=0;k<5;k++){
+      const sw = W*(0.12 + rnd(i*7+k,63)*0.28);
+      ctx.globalAlpha = 0.05*(1-u*0.55)*lerp(0.4,1,ease(p))*(0.5+0.5*rnd(i*7+k,64));
+      ctx.fillRect(rnd(i*7+k,65)*(W-sw), y, sw, h);
+    }
   }
-  // ARRIVED: the scattered glints fill in behind into one continuous column —
-  // the moonpath stops being a scatter and becomes a road — and the whole sea
-  // picks up a sheen at the horizon. Tuned up hard: at half these values p=0.88
-  // and p=1.00 were indistinguishable on the phone, which fails the whole point
-  // of an arrival state. Hazes, not a per-frame linear gradient; the shape is a
-  // cone either way.
-  haze(moonX, yTop + (H-yTop)*0.12, W*0.20, '205,225,255', 0.22*arrive);
-  haze(moonX, yTop + (H-yTop)*0.50, W*0.44, '150,190,255', 0.13*arrive);
-  haze(W*0.5,  yTop + (H-yTop)*0.06, W*1.10, '130,170,235', 0.09*arrive);
+  ctx.globalAlpha = 1;
+  // horizon: a soft band, never a drawn line. Elliptical and THIN — a circular
+  // haze this wide bleeds halfway down the sea and reads as fog.
+  hazeE(W*0.5, yTop, W*0.95, (H-yTop)*0.05, '120,160,220', 0.10*lerp(0.3,1,ease(p)));
+  hazeE(sunX,  yTop, W*0.40, (H-yTop)*0.10,
+        rgbs(mix3([200,215,255],[255,196,126],light)), 0.28*lerp(0.3,1,ease(p)));
 
-  // a sparse scatter of glints away from the moonpath so the sea isn't empty
+  // ---- the path. Same cone twice: cool under the moon while it owns the sky,
+  // gold under the sun once it doesn't. One routine, two lights.
+  const path = (x, colour, k) => {
+    if(k < 0.01) return;
+    const ng = Math.round(lerp(70, 200, ease(p)));
+    ctx.fillStyle = colour;
+    for(let i=0;i<ng;i++){
+      const u  = Math.pow(rnd(i,31), 1.8);            // packed near the horizon
+      const y  = yTop + u*(H-yTop);
+      const dz = u + 0.04;
+      const cone = W*(0.06 + 0.55*dz);
+      const off  = (rnd(i,32)-0.5)*cone
+                 + Math.sin(t*0.6 + i*0.7)*cone*0.06; // slow lateral swim
+      const fall = Math.exp(-Math.pow(off/(cone*0.55),2));
+      const w = (1.2 + 15*dz*rnd(i,33)) * PX;
+      const h = Math.max(1, 3.0*dz*PX);
+      // Slow, and PHASED BY DISTANCE (u*6), so the shimmer travels down the road
+      // as a wave. Independent per-glint flicker at ~1.1rad/s is noise-frequency:
+      // it is exactly what made this field read as video static.
+      const flick = 0.35 + 0.65*Math.pow(Math.abs(Math.sin(t*0.35 + u*6 + i*0.4)), 2.5);
+      const a = fall*flick*k*Math.pow(1-u,1.6);
+      ctx.globalAlpha = a*0.25;                       // soft underlay: caught light
+      ctx.fillRect(x + off - w*1.5, y - h*0.5, w*3, h*2);
+      ctx.globalAlpha = a;                            // then the hard core
+      ctx.fillRect(x + off - w/2, y, w, h);
+    }
+    ctx.globalAlpha = 1;
+  };
+  // tripled early: moonlight on black water is the ONLY thing the night frame
+  // has to show, and at 0.10 it was invisible
+  path(moonX, '#cfe0ff', lerp(0.30,0.45,ease(p))*(1-light));
+  path(sunX,  '#ffdca8', 0.50*light*(1+0.5*arrive));
+
+  // ARRIVED: the scattered glints fill in behind into one continuous column —
+  // the path stops being a scatter and becomes a road — and the sea picks up a
+  // sheen at the horizon. Tuned up hard: at half these values p=0.88 and p=1.00
+  // were indistinguishable on the phone, which fails the point of an arrival
+  // state. Hazes, not a per-frame gradient; the shape is a cone either way.
+  // The column follows the light, so it is under the sun by the time it lands.
+  const px = lerp(moonX, sunX, clamp01(light*1.4));
+  const pc = rgbs(mix3([170,200,255],[255,190,120],light));
+  // Partly driven by `light` as well, so the sun owns a reflection the moment it
+  // is up rather than only once the session lands — the road forms with the sun.
+  haze(px, yTop + (H-yTop)*0.12, W*0.20, pc, 0.16*light + 0.20*arrive);
+  // the bridge. Without it these two don't overlap mid-column and the gap reads
+  // as a dark wedge — the brightest thing in the sky appearing to cast a shadow.
+  haze(px, yTop + (H-yTop)*0.28, W*0.30, pc, 0.10*light + 0.14*arrive);
+  haze(px, yTop + (H-yTop)*0.50, W*0.44, pc, 0.08*light + 0.12*arrive);
+  hazeE(W*0.5, yTop + (H-yTop)*0.04, W*1.10, (H-yTop)*0.10, pc, 0.06*light + 0.09*arrive);
+
+  // a sparse scatter of glints away from the path so the sea isn't empty
+  // Gated on `light` and width-capped: a lone hard 16px dash on black water is
+  // not a glint, it's a dead pixel — and there is nothing for it to reflect at
+  // night anyway.
+  ctx.fillStyle = css(mix3([190,215,255],[255,220,180],light));
   for(let i=0;i<Math.round(lerp(30,120,p));i++){
     const u = Math.pow(rnd(i,41), 1.6);
-    const y = yTop + u*(H-yTop);
-    ctx.globalAlpha = 0.10*(0.4+0.6*Math.sin(t*0.9+i*1.7))*bright;
-    ctx.fillRect(rnd(i,42)*W, y, (2+14*u)*PX, Math.max(1,1.2*u*PX));
+    // Structural, not a tuned falloff: a lone hard rect on smooth near water is
+    // not a glint, it's a stuck pixel, and it only takes one. Fading it worked
+    // at dawn and came back in full morning, when the brighter sea re-exposed
+    // it — so the near field is simply excluded. The road owns that region.
+    if(u > 0.7) continue;
+    ctx.globalAlpha = 0.10*(0.4+0.6*Math.sin(t*0.9+i*1.7))*lerp(0.25,1,ease(p))*(0.3+0.7*light)*(1-u*u);
+    ctx.fillRect(rnd(i,42)*W, yTop + u*(H-yTop), (2+8*u)*PX, Math.max(1,1.2*u*PX));
   }
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
@@ -816,9 +976,9 @@ function frame(now){
   mt += dts;
   const t = mt;
 
-  if(scene <= 1) drawGL(dts, t);
-  else if(scene === 2) galaxy(t);
-  else if(scene === 3) tide(t);
+  if(scene === 0) drawGL(dts, t);
+  else if(scene === 1) galaxy(t);
+  else if(scene === 2) tide(t);
   else crystal(t);
 }
 requestAnimationFrame(frame);
