@@ -218,6 +218,19 @@ for(const c of [glCanvas, c2dCanvas]) c.addEventListener('dblclick', () => {
 const gl = glCanvas.getContext('webgl', {antialias:true});
 const MAX = 14;
 
+// The field is no longer *drawn*, it is LIT. Same one-pass metaball sum, but the
+// loop now also accumulates the analytic gradient of f — three extra ALU per ball
+// and it buys a surface normal, which is the whole ballgame: with a normal you get
+// Fresnel, specular, an environment reflection, and refraction of the backdrop
+// through the body. That is the difference between "glowing blob" and "a volume of
+// liquid sitting in a room".
+//
+// Why refraction and not more emission: an emissive blob has no relationship to
+// anything behind it, so it always reads as a sprite pasted on. Bending the
+// backdrop through it — with a per-channel bend, so the edges disperse into colour
+// — locks the body into the same space as the background. The backdrop therefore
+// has to have STRUCTURE (two light pools, a drifting sheet); a flat gradient
+// refracts into a flat gradient and none of this is visible.
 const fsrc = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -229,50 +242,217 @@ uniform float uTime, uP, uArrive, uOver;
 uniform int   uCount;
 uniform vec3  uBalls[${MAX}];
 
+// The two light POSITIONS, in q-space, sitting exactly on the two backdrop pools.
+// Positions, not directions: with fixed direction vectors every ball got an
+// identical decal — same highlight at the same offset, twelve rubber stamps — and
+// the reflection reported nothing about where the ball was. Aiming them at the
+// pools means the room's actual layout is what you see in the surface.
+const vec2 P1 = vec2(0.30, 0.80);   // cool key
+const vec2 P2 = vec2(0.78, 0.16);   // warm fill
+
 float hash(vec2 v){ return fract(sin(dot(v, vec2(12.9898,78.233)))*43758.5453); }
+vec3  pal(float t){ return 0.5+0.5*cos(6.2832*(t + vec3(0.0,0.33,0.67))); }
+
+// The room. Sampled once straight, then three more times through the body at
+// slightly different bend strengths — so keep it cheap: rational falloffs, no exp.
+// Everything is in q-space (x pre-multiplied by aspect) so the pools stay round.
+vec3 backdrop(vec2 q, float ax, float e){
+  vec3 c = mix(vec3(0.016,0.019,0.038), vec3(0.040,0.026,0.058), q.y);
+  vec2 a = q - vec2(P1.x*ax, P1.y);
+  vec2 b = q - vec2(P2.x*ax, P2.y);
+  // Each pool gets a broad halo AND a tight core: refraction is only legible
+  // against something with an EDGE, since a lens over a smooth gradient displaces
+  // a smooth gradient — i.e. displaces nothing you can see. The core is ha⁴ rather
+  // than a second rational falloff: visually the same tight spot, but it trades a
+  // divide for two multiplies. This function runs FOUR times per lit pixel, so
+  // everything in here costs quadruple, and it showed up in the thermals.
+  float ha = 1.0/(1.0+dot(a,a)*22.0), hb = 1.0/(1.0+dot(b,b)*26.0);
+  float ha2 = ha*ha, hb2 = hb*hb;
+  c += vec3(0.20,0.36,0.72) * (0.30*ha + 0.17*ha2*ha2);
+  c += vec3(0.70,0.22,0.40) * (0.26*hb + 0.15*hb2*hb2);
+  // ONE faint hard band, same reasoning — a straight line is the cheapest thing a
+  // surface can visibly bend. Gated by ha² so it stays a streak spilling off the
+  // lamp; any wider and it is a seam ruled across the frame, which is a defect.
+  // The second band bought nothing the first didn't, and cost a full extra tap.
+  c += vec3(0.06,0.08,0.13) * ha2
+     * smoothstep(0.012,0.0,abs(q.y-0.44-0.03*sin(uTime*0.09)));
+  // a slow drifting sheet: the refraction needs moving detail to bend, or the
+  // body looks frozen even while the balls move. One sine, not a product of two —
+  // the second only deepened the modulation and cost 4 more sines per pixel.
+  c += vec3(0.050,0.066,0.115) * (0.5+0.5*sin(q.y*9.0 - q.x*13.0 + uTime*0.11));
+  return c * mix(0.85, 1.15, e);
+}
+
+vec3 env(vec3 rd, vec3 L1, vec3 L2, vec3 kc, vec3 fc){
+  vec3 c = mix(vec3(0.010,0.014,0.030), vec3(0.075,0.10,0.17), rd.y*0.5+0.5);
+  c += kc * pow(max(dot(rd,L1),0.0), 7.0) * 1.5;
+  c += fc * pow(max(dot(rd,L2),0.0), 9.0) * 1.0;
+  return c;
+}
 
 void main(){
   vec2 uv = gl_FragCoord.xy / uRes.xy;
-  float aspect = uRes.x / uRes.y;
-  vec2 q = vec2(uv.x*aspect, uv.y);
+  float ax = uRes.x / uRes.y;
+  vec2 q = vec2(uv.x*ax, uv.y);
   float e = uP*uP*(3.0-2.0*uP);          // eased p
 
-  float f = 0.0;
+  float f = 0.0; vec2 g = vec2(0.0); float gs = 0.0;
   for(int i=0;i<${MAX};i++){
     if(i>=uCount) break;
     vec2 d = q - uBalls[i].xy;
-    f += (uBalls[i].z*uBalls[i].z) / (dot(d,d)+0.0006);
+    // The softening epsilon has to scale with r², not be a constant. A constant
+    // truncates the top of the dome at a height that depends on ball size, and a
+    // truncated top means a non-zero slope in a radially varying direction right
+    // at the centre — which shades as a dark pinwheel crease through every ball.
+    // Relative to r² the cap is scale-free: the apex is always effectively flat.
+    // (+1e-7 because a just-born ball has r=0 and could sit on a pixel centre.)
+    float rr = uBalls[i].z*uBalls[i].z;
+    float dd = dot(d,d) + 0.002*rr + 1e-7;
+    float w = rr/dd;
+    f += w;
+    g -= (2.0*w/dd)*d;                   // exact gradient of the same sum
+    // Sum of SQUARED per-ball gradient magnitudes. |grad_i| = 2w/dd*|d| and
+    // |d|² ≈ dd, so |grad_i|² = 4w²/dd — no sqrt in the loop. sqrt(gs) vs |g|
+    // is how much the gradients are cancelling each other, which is exactly the
+    // "how much of a saddle is this" number the normal needs below.
+    gs += 4.0*w*w/dd;
   }
-  float edge = smoothstep(0.80,1.00,f);
-  float rim  = edge * pow(max(1.0-abs(f-1.0),0.0),8.0);
-  float glow = clamp(f,0.0,2.0);
-  vec3 col;
+  gs = sqrt(gs);
 
-  // NEON — evolution is density; palette warms and the halo swells so a
-    // glance reads progress without counting blobs.
-    vec3 bg = mix(vec3(0.012,0.010,0.028), vec3(0.05,0.02,0.075), e);
-    float w = 0.5+0.5*sin(uTime*0.18 + uv.x*3.2 + uv.y*2.4);
-    vec3 c = mix(vec3(0.20,0.75,1.0), vec3(1.0,0.15,0.55), mix(0.15,0.85,e)*w + 0.15*e);
-    // ARRIVED: the emission temperature turns over — magenta/cyan neon anneals
-    // into gold. Applied to c, so rim, halo and core all warm together and the
-    // change is readable at a glance without counting anything.
-    // (Collapsing the hot-core threshold instead was tried and flattens the whole
-    // interior to one featureless cream mass — the thing the radius curve exists
-    // to prevent. Change the light, not the fill.)
-    c = mix(c, mix(c, vec3(1.0,0.66,0.26), 0.78), uArrive);
-    // late: a second, hotter core colour blooms inside the thickest field
-    vec3 hot = mix(c, vec3(1.0,0.85,0.75), smoothstep(1.4,2.6,f)*e);
-    col  = bg;
-    col += c*pow(glow,1.7)*mix(0.07,0.16,e);
-    col  = mix(col, hot*0.9, edge);
-    col += rim*c*mix(0.5,1.05,e);
-    // and a steady halo that doesn't care where the balls happen to be — the
-    // cue has to survive the mass drifting under it, or it reads as a flicker
-    col += c*pow(glow,1.1)*0.035*uArrive;
-    // OVERDUE: the surrounding air keeps warming. Nothing dims; the room just
-    // gets slowly redder, which is what tells you it's been done a long while.
-    col += vec3(0.055,0.012,0.030)*uOver;
-    col += vec3(0.30,0.10,0.16)*pow(glow,2.5)*0.05*uOver;
+  // Light colours carry the whole p/arrive/over story: cool blue-white early,
+  // richer and warmer as density builds, annealing to gold on arrival, and the
+  // air itself reddening when overdue. Tint the LIGHT, not the fill — the fill
+  // is a material and materials don't change colour, rooms do.
+  vec3 kc = mix(vec3(0.55,0.80,1.00), vec3(0.85,0.72,1.00), e);
+  vec3 fc = mix(vec3(1.00,0.45,0.55), vec3(1.00,0.55,0.35), e);
+  kc = mix(kc, vec3(1.00,0.82,0.50), uArrive);
+  fc = mix(fc, vec3(1.00,0.60,0.24), uArrive);
+
+  // A real view ray, not a fixed (0,0,1). Everything downstream (reflection,
+  // both halfway vectors, Fresnel) was previously a function of the normal ALONE,
+  // which is why every ball wore the same decal wherever it sat. Weak perspective
+  // is enough — highlights now slide across the frame as a body drifts.
+  vec3 rd = normalize(vec3((q - vec2(0.5*ax,0.5))*0.9, -1.0));
+  // and the lights are places in the room, so a body near the cool pool is lit
+  // cool from that side and one near the warm pool is lit warm
+  vec3 L1 = normalize(vec3(vec2(P1.x*ax,P1.y) - q, 0.55));
+  vec3 L2 = normalize(vec3(vec2(P2.x*ax,P2.y) - q, 0.55));
+
+  vec3 col = backdrop(q, ax, e);
+  col += vec3(0.050,0.012,0.026)*uOver;
+
+  // Caustic, for free. We already have the gradient, so f a short step toward the
+  // key light is just a first-order extrapolation — no second field evaluation.
+  // The band where that stepped field crosses the surface lands on the backdrop
+  // just outside the body, which is exactly where a lens would throw its light.
+  // Kept as a soft CRESCENT, not a band: a band reads as a second contour offset
+  // from the blob — an obvious duplicate outline that gives the trick away.
+  float fl = f + dot(g, L1.xy*0.024);
+  float ca = smoothstep(0.45,1.05,fl) * (1.0-smoothstep(0.70,1.00,f));
+  col += kc * ca * mix(0.10,0.20,e);
+
+  // outside halo — the body sits in a faintly lit medium rather than a vacuum
+  col += kc * pow(clamp(f,0.0,1.0),3.0) * mix(0.05,0.10,e) * (1.0+0.6*uArrive);
+
+  float edge = smoothstep(0.965,1.035,f);
+  // Coherent branch: most of the frame is empty, and shading it would cost three
+  // extra backdrop taps per pixel for nothing. Threshold is below the surface so
+  // the antialiased rim is never clipped.
+  if(f > 0.85){
+    // THE NORMAL. Not a bump map of the gradient — an actual sphere.
+    // For one ball f = (r/d)², so the dome height in ball-radius units is
+    // sqrt(1-1/f) and the slope is 1/sqrt(f-1): a hemisphere, and crucially it
+    // self-scales, so a big lazy ball and a small tight one both curve correctly
+    // with no radius uniform. Slope*ĝ then collapses to normalize(vec3(-ĝ, th)).
+    // (Scaling the raw gradient instead — the obvious first move — gives a normal
+    // that is dead flat wherever f is large, i.e. a pancake with rolled edges:
+    // the whole interior shades to one constant colour.)
+    // th is CLAMPED. sqrt(f-1) is the single-ball dome height, and it is simply
+    // the wrong model in an overlap: f piles up where two balls meet but the true
+    // surface there is a saddle, so an unclamped th fabricates a violently steep
+    // normal and throws the angular shards that were showing up at every neck.
+    float th = sqrt(min(f,3.0)-1.0+0.03);
+    // Softened normalize, scale-free. |g| hits zero at every apex and saddle and
+    // its direction flips across a pixel there — a hard black crease. The soften
+    // constant can't be absolute (|g| ≈ 2/r, so one number is either useless on
+    // small balls or overwhelming on big ones); the EXCESS gs-|g| is how much
+    // cancellation is happening, is zero for an isolated ball, and carries the
+    // same units, so it damps the tangent exactly where the normal is unreliable.
+    // gm, not length(g): |g| has a KINK where the gradient crosses zero, and every
+    // term built on it inherits that corner — which drew a hard closed contour
+    // along the cancellation locus around each embedded ball. Softening the
+    // magnitude relative to gs (so it is still scale-free) removes the corner
+    // itself rather than hiding it downstream.
+    float gm = sqrt(dot(g,g) + 0.03*gs*gs) + 1e-5;
+    float ex = max(gs - gm, 0.0);
+    vec3  n  = normalize(vec3(-g/(gm + 1.2*ex), th));
+    // True dome height for DEPTH, taken from the unclamped field — the clamp above
+    // exists to tame the normal and must not also flatten the thickness cue.
+    float od = sqrt(max(1.0 - 1.0/max(f,1.0), 0.0));
+    // Capillary ripple. A perfectly clean normal reads as solid glass; a liquid
+    // has a skin that moves. Two sines is enough — the speculars multiply the
+    // perturbation into travelling glints, which is what the eye reads as "wet".
+    // Scaled by od so it dies at the rim, and by the same reliability factor, so
+    // it isn't amplified at exactly the necks where the normal is already guessy.
+    float rel = gm/(gm + ex);
+    float rp = 0.075*od*od*rel;
+    n = normalize(n + vec3(rp*sin(q.x*52.0 + q.y*21.0 - uTime*0.85),
+                           rp*sin(q.y*45.0 - q.x*25.0 + uTime*1.05), 0.0));
+    float ndv = max(dot(n,-rd), 0.0);
+    float F   = 0.04 + 0.96*pow(1.0-ndv, 5.0);
+
+    // Refraction with dispersion. Three taps, one per channel, bend scaled by
+    // thickness — thin edges bend hard, the middle is nearly clear glass.
+    vec2 bend = n.xy * (0.05 + 0.16*od);
+    vec3 refr = vec3(backdrop(q - bend*0.88, ax, e).r,
+                     backdrop(q - bend*1.00, ax, e).g,
+                     backdrop(q - bend*1.14, ax, e).b);
+    // Beer–Lambert over the dome depth. The ARRIVED coefficients used to transmit
+    // ~3% blue, which annihilated the refraction at the one moment the scene is
+    // supposed to pay off: no room came through, so all that was left was smooth
+    // subsurface and a smooth ember, i.e. painted copper. Gold is the job of kc/fc,
+    // which are already gold — it must not be bought by crushing a channel to zero.
+    vec3 ab = mix(mix(vec3(1.55,0.80,0.42), vec3(1.05,1.35,0.40), e),
+                  vec3(0.30,0.55,0.95), uArrive);
+    vec3 trans = exp(-ab*od*1.4);
+    vec3 body = refr * 2.9 * trans;
+    // Subsurface. Light that enters and scatters rather than passing through —
+    // without it a strongly absorbing liquid is just a hole cut in the frame.
+    // Deliberately weaker than the refraction: it carries no structure, so too
+    // much of it flattens the body back into a painted shape.
+    body += kc * trans * (0.25+0.40*max(dot(n,L1),0.0)) * 0.72;
+    body += fc * trans * max(dot(n,L2),0.0) * 0.28;
+    // An ember at the deepest point of the mass. pow(od,7) is tiny except where
+    // the field genuinely piles up, so it marks real depth rather than painting a
+    // gradient — and it gives the cool body a warm heart, which is the contrast
+    // that stops a glass object reading as an ice cube. Brightens with density.
+    body += mix(vec3(1.00,0.30,0.48), vec3(1.00,0.70,0.34), uArrive)
+          * pow(od,9.0) * mix(0.22,0.85,e) * (1.0+0.8*uOver);
+
+    vec3 refl = env(reflect(rd, n), L1, L2, kc, fc);
+    vec3 surf = mix(body, refl, F);
+
+    // two hard speculars — the single cue that most says "rendered". Halfway
+    // vectors built off the real view ray and the positional lights, so which
+    // light wins, and where its highlight lands, both depend on where you are.
+    surf += kc * pow(max(dot(n, normalize(L1-rd)),0.0), 70.0) * 2.2;
+    surf += fc * pow(max(dot(n, normalize(L2-rd)),0.0), 26.0) * 0.6;
+    // thin-film at the interface: path length shifts the hue across the body and
+    // it concentrates at grazing angles. Calms down on arrival — gold, not petrol.
+    // Thin film, driven mostly by view angle rather than depth. Sweeping it with
+    // od cycles the cosine palette across the interior and lays down closed
+    // colour contours — reads as topographic banding, not as a material.
+    // Thin film. Less than one full cycle across the whole F range on purpose: a
+    // palette that wraps lays down closed colour contours, which read as a
+    // topographic map rather than as a material. This is a hue drift toward the
+    // silhouette, gated by rel so it can't decorate an unreliable normal.
+    surf += pal(0.22*F + 0.10*od + 0.03*uTime) * F * rel * mix(0.40,0.15,uArrive);
+
+    col = mix(col, surf, edge);
+  }
+  // hot contact line right at the isosurface — keeps some of the neon soul and
+  // hides the seam where the branch hands over
+  col += kc * pow(max(1.0-abs(f-1.0),0.0),16.0) * mix(0.22,0.45,e) * (1.0+uOver);
 
   vec2 v = uv-0.5;
   col *= 1.0 - dot(v,v)*0.35;
@@ -308,8 +488,9 @@ for(let i=0;i<MAX;i++){
   balls.push({ x:0.5+(Math.random()-0.5)*0.5, y:0.5+(Math.random()-0.5)*0.5,
     vx:Math.cos(a), vy:Math.sin(a),
     r: i<2 ? 0.09+Math.random()*0.03 : 0.045+Math.random()*0.03,
-    spin:(Math.random()-0.5)*0.22 });
+    spin:(Math.random()-0.5)*0.22, alive:false });
 }
+balls[0].alive = true;
 const ballData = new Float32Array(MAX*3);
 let glAspect = 1;
 
@@ -320,19 +501,78 @@ function drawGL(dt, t){
   gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc,2,gl.FLOAT,false,0,0);
   gl.viewport(0,0,glCanvas.width,glCanvas.height);
   gl.uniform2f(uRes, glCanvas.width, glCanvas.height);
-  const count = Math.max(1, Math.round(lerp(1, MAX, late(p))));
+  // Continuous birth. This used to be Math.round() of a float, so a ball popped
+  // into existence at full radius the instant the rounding flipped — the visible
+  // jump. Now the FRACTIONAL PART IS the newest ball's growth ramp, and it is
+  // born AT ITS PARENT'S POSITION: new mass buds off an existing body instead of
+  // materialising in empty space. A radius ramp alone isn't enough — something
+  // swelling from nothing where nothing was still reads as a pop. Parentage is a
+  // binary tree ((i-1)>>1) so the divisions spread around the frame instead of
+  // all budding off ball 0. rs is already smooth in p, so the rescale breathes.
+  const fc = 1 + (MAX-1)*late(p);
+  const count = Math.min(MAX, Math.ceil(fc));
   // radius shrinks as count grows, or 14 balls fuse into one featureless mass at p=1
-  const rs = lerp(1.5, 0.6, late(p)) * (1 + 0.28*over);
+  // shrunk from the emissive era's 1.5..0.6: a lit body needs to be SEEN AS a
+  // body, and one screen-filling mass has no silhouette to light
+  const rs = lerp(1.15, 0.52, late(p)) * (1 + 0.28*over);
+  // The two seed bodies shrink far less than the crowd. With one shared scale the
+  // i<2 pair flattened into the swarm at p=1 and the frame became a bag of
+  // identical beads — nothing read as "the body" and the rest as "satellites".
+  const rsBig = lerp(1.15, 0.90, late(p)) * (1 + 0.28*over);
+  const rOf = j => balls[j].r * (j<2 ? rsBig : rs);
+  // Bounce walls contract as the field fills out. With one body on screen a free
+  // random walk parks it in a corner for minutes at a time and the frame is a
+  // dead composition; once there are a dozen, the whole frame should be in play.
+  // Still a reflection off a wall, so the constant-speed invariant is untouched.
+  // ...and never reaches zero: the seed bodies are ~0.10 across at p=1, so a 0.02
+  // margin lets the hero mass sit 80% off-frame. It has to stay in the picture.
+  const wall = lerp(0.30, 0.10, late(p));
+  for(let i=count;i<MAX;i++) balls[i].alive = false;   // scrubbing back kills them
   for(let i=0;i<count;i++){
     const b = balls[i];
+    const w = Math.min(1, fc - i);      // 1 once settled, 0..1 while being born
+    if(w <= 0){ b.alive = false; ballData[i*3+2] = 0; continue; }
+    if(!b.alive){ const par = balls[(i-1)>>1]; b.x = par.x; b.y = par.y; b.alive = true; }
+    // Weak flocking. Independent random walkers almost never touch, and merging
+    // and splitting IS this scene's subject — a frame of isolated beads is the
+    // scene failing, which is what the dead centre bands were. Each ball steers
+    // toward the midpoint of its two nearest neighbours, and peels away from the
+    // nearest once they are closer than a merge radius, so the field hovers at
+    // the interesting distance instead of diffusing. Steering is a bounded
+    // ROTATION of the velocity, never an addition, so the constant-speed and
+    // perfectly-elastic-bounce invariant CLAUDE.md warns about still holds.
+    // ponytail: O(n²) = 196 pair tests a frame, free at MAX=14. Needs a grid only
+    // if MAX ever grows by an order of magnitude.
+    let n1=-1, n2=-1, d1=9, d2=9;
+    for(let j=0;j<count;j++){
+      if(j===i || !balls[j].alive) continue;
+      const o = balls[j], ddx = o.x-b.x, ddy = o.y-b.y, dsq = ddx*ddx+ddy*ddy;
+      if(dsq < d1){ d2=d1; n2=n1; d1=dsq; n1=j; } else if(dsq < d2){ d2=dsq; n2=j; }
+    }
+    if(n1 >= 0){
+      const a1 = balls[n1], a2 = balls[n2 >= 0 ? n2 : n1];
+      // Separation turns much harder than cohesion. Symmetric rates fuse the whole
+      // field into one connected chain within a minute — no negative space, no
+      // distinct bodies, which is a different way of failing than beads.
+      const sep = (rOf(i) + rOf(n1)) * 2.2;
+      const close = d1 < sep*sep;
+      let tx, ty;
+      if(close){ tx = b.x-a1.x; ty = b.y-a1.y; }
+      else { tx = (a1.x+a2.x)*0.5 - b.x; ty = (a1.y+a2.y)*0.5 - b.y; }
+      const rate = (close ? 1.2 : 0.30) * dt;
+      const ang = Math.atan2(b.vx*ty - b.vy*tx, b.vx*tx + b.vy*ty);
+      const k = Math.max(-rate, Math.min(rate, ang));
+      const ck = Math.cos(k), sk = Math.sin(k);
+      const tv = b.vx*ck - b.vy*sk; b.vy = b.vx*sk + b.vy*ck; b.vx = tv;
+    }
     const ca = Math.cos(b.spin*dt), sa = Math.sin(b.spin*dt);
     const vx = b.vx*ca - b.vy*sa; b.vy = b.vx*sa + b.vy*ca; b.vx = vx;
     b.x += b.vx*0.055*dt; b.y += b.vy*0.055*dt;
-    if(b.x<0.02){b.x=0.02;b.vx=Math.abs(b.vx);} if(b.x>0.98){b.x=0.98;b.vx=-Math.abs(b.vx);}
-    if(b.y<0.02){b.y=0.02;b.vy=Math.abs(b.vy);} if(b.y>0.98){b.y=0.98;b.vy=-Math.abs(b.vy);}
+    if(b.x<wall){b.x=wall;b.vx=Math.abs(b.vx);} if(b.x>1-wall){b.x=1-wall;b.vx=-Math.abs(b.vx);}
+    if(b.y<wall){b.y=wall;b.vy=Math.abs(b.vy);} if(b.y>1-wall){b.y=1-wall;b.vy=-Math.abs(b.vy);}
     ballData[i*3]   = b.x * glAspect;
     ballData[i*3+1] = b.y;
-    ballData[i*3+2] = b.r * rs;
+    ballData[i*3+2] = rOf(i) * ease(w);     // smoothstep: C1 at both ends of the ramp
   }
   gl.uniform3fv(uBalls, ballData);
   gl.uniform1i(uCount, count);
