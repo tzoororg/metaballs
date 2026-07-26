@@ -41,7 +41,7 @@ overlapping arcs instead of hard-cutting between phases.
 
 ### Scenes
 
-Dispatched by index in `frame()` ([evolve.html:1848](evolve.html:1848)) and declared as tab buttons
+Dispatched by index in `frame()` ([evolve.html:1374](evolve.html:1374)) and declared as tab buttons
 (`data-scene`). Adding one means both places.
 
 | # | scene | surface |
@@ -49,12 +49,12 @@ Dispatched by index in `frame()` ([evolve.html:1848](evolve.html:1848)) and decl
 | 0 | Metaballs | WebGL — one fragment pass, `r²/dist²` field summed per pixel |
 | 1 | Galaxy | WebGL — density-wave spiral |
 | 2 | Tide | 2D canvas (the only one), with a sunrise arc |
-| 3 | Murmuration | WebGL |
-| 4 | Silk | WebGL |
-| 5 | Rain | WebGL |
 
-Scenes 0/1/3/4/5 share the single GL context; Tide owns the 2D canvas. `setScene()` keeps the two
-canvases mutually exclusive — don't add a second GL context.
+Metaballs and Galaxy share the single GL context; Tide owns the 2D canvas. `setScene()` keeps the
+two canvases mutually exclusive — don't add a second GL context.
+
+Crystal was removed in `eb569c3` (it stopped evolving past ~60% and never recovered). Murmuration,
+Silk, and Rain were mocked but are **not** in the tree.
 
 ### Query-string knobs (how you iterate fast)
 
@@ -62,7 +62,7 @@ canvases mutually exclusive — don't add a second GL context.
 ?dev=1              scrubber + play sweep; double-tap toggles chrome (desktop iteration)
 ?sweep=15           sweep the whole arc in 15s instead of 60
 ?mins=1             1-minute session, for an end-to-end phone test
-?scene=3            boot straight into a scene
+?scene=2            boot straight into a scene (0 Metaballs, 1 Galaxy, 2 Tide)
 ?fps=30&scale=0.5   phone thermal relief — quarter the fragment work
 ```
 

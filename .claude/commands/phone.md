@@ -22,7 +22,7 @@ Run this yourself, in order. Don't ask permission between steps.
    adb shell am start -a android.intent.action.VIEW -d "http://localhost:8791/evolve.html?dev=1&sweep=15" com.android.chrome
    ```
    Add `&scene=N` / `&mins=1` / `&fps=30&scale=0.5` per `$ARGUMENTS`. Scene indices: 0 Metaballs,
-   1 Galaxy, 2 Tide, 3 Murmuration, 4 Silk, 5 Rain.
+   1 Galaxy, 2 Tide.
 4. **Reload with devtools attached** (`navigate_page {type:"reload"}`) — otherwise parse-time errors
    are already gone by the time you read the console.
 5. **Judge from `take_screenshot`.** Never from `gl.readPixels` — the canvas is
