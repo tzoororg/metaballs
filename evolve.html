@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -93,7 +93,6 @@
       <button data-scene="0" aria-pressed="true">Metaballs</button>
       <button data-scene="1" aria-pressed="false">Galaxy</button>
       <button data-scene="2" aria-pressed="false">Tide</button>
-      <button data-scene="3" aria-pressed="false">Crystal</button>
     </nav>
     <button id="start">Start</button>
     <p id="hint">Double-tap the animation to come back here</p>
@@ -1335,153 +1334,6 @@ function tide(t){
   ctx.globalCompositeOperation = 'source-over';
 }
 
-// --- CRYSTAL -------------------------------------------------------------
-// Dendritic growth. Each segment carries a birth window; p reveals it.
-// Birth times are NORMALISED to span the whole session — the generator's raw
-// times bunched into 0..0.35, which is why growth used to stop around 60%.
-const segs = [];
-(function grow(x,y,ang,len,t0,depth){
-  if(depth > 7 || len < 4) return;
-  const t1 = t0 + 0.12/(depth*0.5+1);
-  const x2 = x + Math.cos(ang)*len, y2 = y + Math.sin(ang)*len;
-  segs.push({x,y,x2,y2,t0,t1,depth,ang});
-  const seed = segs.length;
-  grow(x2,y2,ang + (rnd(seed,11)-0.5)*0.25, len*0.82, t1, depth+1);
-  if(rnd(seed,12) > 0.25) grow(x2,y2,ang + 0.62 + (rnd(seed,13)-0.5)*0.3, len*0.6, t1, depth+1);
-  if(rnd(seed,14) > 0.25) grow(x2,y2,ang - 0.62 + (rnd(seed,15)-0.5)*0.3, len*0.6, t1, depth+1);
-})(0,0,0,56,0,0);
-// Re-time by SEGMENT COUNT, not by depth. Segment count grows ~2.5x per level,
-// so a depth-linear schedule spends the whole session on a bare skeleton and
-// dumps every fine branch in the last seconds. Giving each depth a slice of p
-// proportional to how many segments it contains makes visible detail arrive at
-// a steady rate — the finest level alone owns the back half of the session.
-{
-  const byDepth = [];
-  for(const s of segs) byDepth[s.depth] = (byDepth[s.depth]||0) + 1;
-  const edges = []; let acc = 0;
-  for(let d=0; d<byDepth.length; d++){ edges[d] = acc/segs.length; acc += byDepth[d]; }
-  edges.push(1);
-  segs.forEach((s,i) => {
-    const a = edges[s.depth], span = edges[s.depth+1] - a;
-    s.t0 = a + rnd(i,51)*span*0.65;      // stagger inside the band, or it grows in lockstep
-    s.t1 = s.t0 + span*0.35 + 0.008;
-  });
-}
-const CRYST_ARMS = 6;
-// Segments of the same depth share a colour and width, so they can go into one
-// path: 6 arms x 8 depths = 48 strokes/frame instead of ~9000. (That naive
-// version ran at 20fps on the phone.)
-const byDepth = [];
-let latticeR = 0;                              // extent, for the arrival halo
-segs.forEach((s,i) => {
-  (byDepth[s.depth] = byDepth[s.depth] || []).push(s);
-  s.spark = s.depth > 3 && rnd(i,60) > 0.86;   // thin the tip sparkles too
-  latticeR = Math.max(latticeR, Math.hypot(s.x2, s.y2));
-});
-
-function crystal(t){
-  ctx.fillStyle = '#04050c'; ctx.fillRect(0,0,W,H);
-  const cx = W/2, cy = H/2;
-  // OVERDUE: it never stops accreting — the whole lattice keeps swelling and the
-  // facets keep thickening. Growth, not a new behaviour, so it can't look like
-  // a second act starting.
-  const s = Math.min(W,H)/420 * lerp(0.42,0.95,ease(p)) * (1+0.10*over);
-  const q = late(p);
-  const spin = t*0.015;
-
-  ctx.globalCompositeOperation = 'lighter';
-  // cold ambient bloom behind the lattice, so it sits in something
-  haze(cx,cy, Math.min(W,H)*lerp(0.25,0.62,ease(p)), '70,110,220', lerp(0.05,0.16,ease(p)));
-  ctx.lineCap = 'round';
-
-  const stroke = [], width = [];
-  const hue = lerp(202,268,q) + 22*over;      // keeps drifting past violet while overdue
-  for(let d=0; d<byDepth.length; d++){
-    stroke[d] = `hsla(${hue - d*3},${lerp(60,88,q)}%,${lerp(48,74,q)}%,${lerp(0.30,0.85,q)})`;
-    width[d]  = Math.max(0.5, (7-d)*0.55);
-  }
-  const facetFill = `hsla(${lerp(212,278,q)},90%,72%,${0.10*q})`;
-  const facetLine = `hsla(${lerp(212,278,q)},95%,80%,${0.30*q})`;
-
-  for(let a=0;a<CRYST_ARMS;a++){
-    ctx.save();
-    ctx.translate(cx,cy);
-    ctx.rotate(a/CRYST_ARMS*6.2832 + spin);
-    ctx.scale(s, s*(a%2 ? -1 : 1));                    // mirror alternate arms
-
-    for(let d=0; d<byDepth.length; d++){
-      let any = false;
-      ctx.beginPath();
-      for(const g of byDepth[d]){
-        if(p <= g.t0) continue;
-        const f = Math.min(1, (p-g.t0)/(g.t1-g.t0));
-        ctx.moveTo(g.x, g.y);
-        ctx.lineTo(lerp(g.x,g.x2,f), lerp(g.y,g.y2,f));
-        any = true;
-      }
-      if(!any) break;                                   // deeper levels can't exist yet
-      ctx.strokeStyle = stroke[d]; ctx.lineWidth = width[d]; ctx.stroke();
-    }
-
-    // hex facets thicken the trunk late — growth that continues after every
-    // branch has already appeared
-    ctx.beginPath();
-    for(let d=0; d<=3 && d<byDepth.length; d++)
-      for(const g of byDepth[d]){
-        const fa = clamp01((p - g.t1)/0.45);
-        if(fa <= 0) continue;
-        const rad = (5.5-d)*2.2*fa*(1+0.45*over);
-        for(let k=0;k<6;k++){
-          const th = g.ang + k*1.0472;
-          const px = g.x2 + Math.cos(th)*rad, py = g.y2 + Math.sin(th)*rad;
-          k ? ctx.lineTo(px,py) : ctx.moveTo(px,py);
-        }
-        ctx.closePath();
-      }
-    ctx.fillStyle = facetFill; ctx.fill();
-    ctx.lineWidth = 0.6; ctx.strokeStyle = facetLine; ctx.stroke();
-
-    // frost sparkle on finished tips — one path, shimmer phased per arm
-    ctx.beginPath();
-    for(let d=4; d<byDepth.length; d++)
-      for(const g of byDepth[d]){
-        if(!g.spark || p < g.t1) continue;
-        ctx.moveTo(g.x2+1.3, g.y2);
-        ctx.arc(g.x2, g.y2, 1.3, 0, 6.2832);
-      }
-    // arrived: the shimmer's floor comes up — the tips are lit, not blinking
-    ctx.globalAlpha = 0.5*q*lerp(0.55+0.45*Math.sin(t*2 + a*1.7), 0.95, arrive*0.7);
-    ctx.fillStyle = '#dff3ff'; ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.restore();
-  }
-
-  // ARRIVED: a hexagonal aura closes through the lattice. Six arms only ever
-  // implied that shape; making it visible is what reads as finished rather than
-  // paused mid-growth — and it holds, so arriving late looks the same.
-  // Soft and INSIDE the tips only. A crisp outline at the full extent reads as a
-  // UI border drawn around the artwork — the one cheap-looking thing in the frame.
-  if(arrive > 0.01){
-    const hr = latticeR * s * 0.84;
-    ctx.beginPath();
-    for(let k=0;k<6;k++){
-      const th = spin + k*1.0472;
-      const px = cx + Math.cos(th)*hr, py = cy + Math.sin(th)*hr;
-      k ? ctx.lineTo(px,py) : ctx.moveTo(px,py);
-    }
-    ctx.closePath();
-    // three widths at falling alpha instead of a blur filter: a single wide
-    // stroke has hard sides and reads as a solid plate, and canvas blur is the
-    // most expensive thing on this phone
-    for(const [w,a] of [[46,0.016],[30,0.020],[16,0.026]]){
-      ctx.strokeStyle = `hsla(${hue},80%,78%,${a*arrive})`;
-      ctx.lineWidth = w*PX; ctx.stroke();
-    }
-  }
-  haze(cx,cy, Math.min(W,H)*0.09*lerp(0.6,1.4,q), '220,240,255', lerp(0.10,0.30,q));
-  ctx.globalCompositeOperation = 'source-over';
-}
-
 // ===== resize + loop =====
 function resize(){
   const dpr = Math.min(devicePixelRatio||1, 2) * SCALE;
@@ -1521,8 +1373,7 @@ function frame(now){
 
   if(scene === 0) drawGL(dts, t);
   else if(scene === 1) galaxy(t);
-  else if(scene === 2) tide(t);
-  else crystal(t);
+  else tide(t);
 }
 requestAnimationFrame(frame);
 </script>
